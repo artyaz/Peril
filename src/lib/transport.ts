@@ -1,4 +1,5 @@
 import type { RoomState, ClientMsg, ServerMsg } from './protocol'
+import { agentDebugLog } from './agentDebug'
 
 type Handler = (msg: ServerMsg) => void
 
@@ -40,6 +41,7 @@ export function connectRoom(opts: {
   let closed = false
   let pollTimer: ReturnType<typeof setInterval> | null = null
   let lastUpdated = 0
+  let requestSeq = 0
 
   void (async () => {
     try {
@@ -75,6 +77,8 @@ export function connectRoom(opts: {
 
   async function poll() {
     if (closed) return
+    const requestId = ++requestSeq
+    const startedAt = Date.now()
     try {
       const res = await fetch('/api/rooms', {
         method: 'POST',
@@ -88,6 +92,27 @@ export function connectRoom(opts: {
       const data = await readJson(res)
       if (!res.ok) throw new Error(data.error || 'State failed')
       const state = data.state as RoomState
+      const incomingUpdatedAt = state.updatedAt || 0
+      const lastUpdatedBefore = lastUpdated
+      // #region agent log
+      agentDebugLog({
+        hypothesisId: 'C',
+        location: 'src/lib/transport.ts:poll',
+        message: 'poll response evaluated',
+        data: {
+          requestId,
+          startedAt,
+          receivedAt: Date.now(),
+          incomingUpdatedAt,
+          lastUpdatedBefore,
+          willApply: incomingUpdatedAt !== lastUpdatedBefore,
+          phase: state.phase,
+          round: state.round,
+          submissions: state.submissions.length,
+          handCount: state.you?.hand.length ?? null,
+        },
+      })
+      // #endregion
       if ((state.updatedAt || 0) !== lastUpdated) {
         lastUpdated = state.updatedAt || 0
         opts.onMessage({ type: 'state', state })
@@ -99,6 +124,8 @@ export function connectRoom(opts: {
 
   function send(msg: ClientMsg) {
     if (closed || msg.type === 'hello') return
+    const requestId = ++requestSeq
+    const startedAt = Date.now()
     void (async () => {
       try {
         const res = await fetch('/api/rooms', {
@@ -114,8 +141,28 @@ export function connectRoom(opts: {
         const data = await readJson(res)
         if (!res.ok) throw new Error(data.error || 'Action failed')
         if (data.state) {
+          const state = data.state as RoomState
+          // #region agent log
+          agentDebugLog({
+            hypothesisId: 'C',
+            location: 'src/lib/transport.ts:send',
+            message: 'action response accepted',
+            data: {
+              requestId,
+              action: msg.type,
+              startedAt,
+              receivedAt: Date.now(),
+              incomingUpdatedAt: state.updatedAt || 0,
+              lastUpdatedBefore: lastUpdated,
+              phase: state.phase,
+              round: state.round,
+              submissions: state.submissions.length,
+              handCount: state.you?.hand.length ?? null,
+            },
+          })
+          // #endregion
           lastUpdated = data.state.updatedAt || Date.now()
-          opts.onMessage({ type: 'state', state: data.state as RoomState })
+          opts.onMessage({ type: 'state', state })
         }
       } catch (e) {
         opts.onError?.(e instanceof Error ? e.message : 'Action failed')
