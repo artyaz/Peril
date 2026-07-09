@@ -2,9 +2,9 @@ import * as THREE from 'three'
 import { Spring } from '../lib/motion'
 
 /** Compact thin cards — slight overlap in hand; peek lifts on hover. */
-export const CARD_W = 0.092
-export const CARD_H = 0.128
-export const CARD_D = 0.0016
+export const CARD_W = 0.084
+export const CARD_H = 0.118
+export const CARD_D = 0.0015
 /** Table surface is a 0.05-tall cylinder centered at y=0 → top at 0.025. */
 export const TABLE_SURFACE_TOP = 0.025
 /** Card center Y so the underside rests flush on the surface (not sunk, not floating). */
@@ -170,9 +170,9 @@ export function createCard(text: string, kind: 'white' | 'black' | 'back' = 'whi
   card.userData = {
     cardText: text,
     kind,
-    lift: new Spring(0, 260, 26),
-    tiltX: new Spring(0, 220, 22),
-    tiltZ: new Spring(0, 220, 22),
+    lift: new Spring(0, 360, 30),
+    tiltX: new Spring(0, 300, 28),
+    tiltZ: new Spring(0, 300, 28),
     baseY: 0,
     baseRotX: 0,
     baseRotY: 0,
@@ -188,7 +188,8 @@ export function dropCard(card: CardMesh, fromY: number, toY: number) {
   card.userData.baseY = toY
   card.userData.lift.set(fromY - toY)
   card.userData.lift.center = 0
-  card.userData.lift.velocity = -0.5
+  // Soft impact — settle with a little downward velocity + micro bounce
+  card.userData.lift.velocity = -2.4
 }
 
 export function updateCardMotion(
@@ -199,9 +200,9 @@ export function updateCardMotion(
   opts: { lift?: number; tiltX?: number; tiltZ?: number } = {},
 ) {
   if (card.userData.dragging) return
-  const targetLift = hovered ? (opts.lift ?? 0.08) : selected ? 0.04 : 0
-  const targetTiltX = hovered ? (opts.tiltX ?? -0.1) : selected ? -0.04 : 0
-  const targetTiltZ = hovered ? (opts.tiltZ ?? 0.025) : selected ? -0.012 : 0
+  const targetLift = hovered ? (opts.lift ?? 0.055) : selected ? 0.028 : 0
+  const targetTiltX = hovered ? (opts.tiltX ?? -0.06) : selected ? -0.025 : 0
+  const targetTiltZ = hovered ? (opts.tiltZ ?? 0.016) : selected ? -0.008 : 0
   const lift = card.userData.lift.animateTo(targetLift, dt)
   const tx = card.userData.tiltX.animateTo(targetTiltX, dt)
   const tz = card.userData.tiltZ.animateTo(targetTiltZ, dt)

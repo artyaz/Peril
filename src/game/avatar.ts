@@ -30,8 +30,8 @@ function makeNameSprite(name: string) {
     depthWrite: false,
   })
   const sprite = new THREE.Sprite(mat)
-  sprite.scale.set(0.55, 0.14, 1)
-  sprite.position.y = 0.98
+  sprite.scale.set(0.48, 0.12, 1)
+  sprite.position.y = 0.92
   return sprite
 }
 
@@ -103,7 +103,7 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
   }
 
   const body = new THREE.Mesh(xpBodyGeometry(), bodyMat)
-  body.scale.set(0.85, 0.85, 0.62)
+  body.scale.set(0.78, 0.78, 0.56)
   body.castShadow = true
   group.add(body)
 
@@ -112,15 +112,15 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
     roughness: 0.82,
     metalness: 0,
   })
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.155, 28, 22), headMat)
-  head.position.y = 0.7
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.14, 28, 22), headMat)
+  head.position.y = 0.64
   head.scale.set(1, 1.02, 0.88)
   head.castShadow = true
   group.add(head)
 
   // Front-only face photo on a shallow sphere patch
   const faceGeo = new THREE.SphereGeometry(
-    0.158,
+    0.143,
     24,
     18,
     Math.PI * 0.22,
@@ -158,8 +158,9 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
   group.add(ring)
 
   const handAnchor = new THREE.Group()
-  handAnchor.position.set(0, 0.48, 0.22)
-  handAnchor.rotation.x = -0.5
+  // Reach toward table rim when seated below the surface
+  handAnchor.position.set(0, 0.55, 0.26)
+  handAnchor.rotation.x = -0.55
   group.add(handAnchor)
 
   let faceTex: THREE.Texture | null = null
