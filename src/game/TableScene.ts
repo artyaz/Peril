@@ -19,7 +19,7 @@ export type TableSceneApi = {
 type SeatLayout = { position: THREE.Vector3; yaw: number }
 
 /** Raised table — seated height, not floor level */
-const TABLE_Y = 1.35
+const TABLE_Y = 1.55
 
 export function createTableScene(): TableSceneApi {
   let threeRenderer: THREE.WebGLRenderer | null = null
@@ -57,12 +57,11 @@ export function createTableScene(): TableSceneApi {
   let handGroup: THREE.Group | null = null
   let worldGroup: THREE.Group | null = null
 
-  // Sitting at a raised table — bottom of screen = hand, top = overview
-  // Pull back so a full hand fits; look slightly down at cards (not up from the floor)
-  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.55, 1.45)
-  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.05, 0.55)
-  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 2.15, 1.75)
-  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + 0.02, -0.2)
+  // Sitting at a raised table — look across the surface, not down from the ceiling
+  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.38, 1.28)
+  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.02, 0.48)
+  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 1.15, 1.85)
+  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + 0.05, -0.15)
 
   function mount(el: HTMLElement) {
     root = el
@@ -110,20 +109,28 @@ export function createTableScene(): TableSceneApi {
     surface.castShadow = true
     tableGroup.add(surface)
 
-    // Soft pedestal fade under the surface
+    // Soft pedestal — taller so the table reads as furniture, not a floor disc
     const pedestal = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.5, 0.78, TABLE_Y * 0.88, 32, 1, true),
+      new THREE.CylinderGeometry(0.42, 0.72, TABLE_Y * 0.92, 32, 1, true),
       new THREE.MeshStandardMaterial({
-        color: '#d6d6d2',
+        color: '#d0d0cc',
         transparent: true,
-        opacity: 0.2,
+        opacity: 0.35,
         roughness: 1,
         side: THREE.DoubleSide,
         depthWrite: false,
       }),
     )
-    pedestal.position.y = -TABLE_Y * 0.44
+    pedestal.position.y = -TABLE_Y * 0.46
     tableGroup.add(pedestal)
+
+    const leg = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.12, 0.18, TABLE_Y * 0.9, 16),
+      new THREE.MeshStandardMaterial({ color: '#c8c8c4', roughness: 0.9, metalness: 0 }),
+    )
+    leg.position.y = -TABLE_Y * 0.45
+    leg.castShadow = true
+    tableGroup.add(leg)
 
     const blob = new THREE.Mesh(
       new THREE.CircleGeometry(1.8, 48),
@@ -323,15 +330,16 @@ export function createTableScene(): TableSceneApi {
     const local = players.find((p) => p.id === localPlayerId)
     const localSeat = local?.seat ?? 0
     const peers = players.filter((p) => p.id !== localPlayerId)
-    // Place peers evenly around the far half of the table (always visible from local seat)
+    // Place peers on the FAR half of the table only (never behind the camera)
     const peerLayouts: SeatLayout[] = peers.map((_, i) => {
       const n = peers.length
       const t = n === 1 ? 0.5 : i / (n - 1)
-      const angle = -Math.PI * 0.72 + t * Math.PI * 1.44 // ~west → north → east arc
-      const dist = 1.85
+      // ~−55° … +55° from north — always in front of the local player
+      const angle = -0.95 + t * 1.9
+      const dist = 1.9
       return {
         position: new THREE.Vector3(Math.sin(angle) * dist, 0, -Math.cos(angle) * dist),
-        yaw: angle + Math.PI, // face table center
+        yaw: Math.atan2(-Math.sin(angle), Math.cos(angle)), // face table center
       }
     })
     void localSeat
@@ -356,17 +364,18 @@ export function createTableScene(): TableSceneApi {
 
       let handle = avatars.get(p.id)
       // Sit so XP silhouette chest meets the raised table rim
-      const sitY = TABLE_Y - 0.95
+      const sitY = TABLE_Y - 0.85
       if (!handle) {
         handle = createAvatar(p.name, p.faceDataUrl)
         avatars.set(p.id, handle)
         worldGroup!.add(handle.group)
-        handle.group.position.set(seat.position.x, sitY - 0.4, seat.position.z)
+        handle.group.position.set(seat.position.x, sitY - 0.35, seat.position.z)
+        // Face table center so held cards point inward
         handle.group.rotation.y = seat.yaw
         const target = handle
-        const fromY = sitY - 0.4
+        const fromY = sitY - 0.35
         tweens.tween(0.75, (v) => {
-          target.group.position.y = fromY + v * 0.4
+          target.group.position.y = fromY + v * 0.35
         }, easeOutBack)
       } else {
         handle.setName(p.name)
@@ -634,12 +643,21 @@ export function createTableScene(): TableSceneApi {
 
     const t = clock.elapsedTime
     for (const [id, a] of avatars) {
-      const sitY = TABLE_Y - 0.95
+      const sitY = TABLE_Y - 0.85
       a.group.position.y = sitY + Math.sin(t * 1.1 + a.group.position.x * 2) * 0.008
+      // Billboard only the XP silhouette toward the camera; hands stay table-facing
+      if (camera) {
+        const worldPos = a.group.getWorldPosition(new THREE.Vector3())
+        const dx = camera.position.x - worldPos.x
+        const dz = camera.position.z - worldPos.z
+        const faceYaw = Math.atan2(dx, dz)
+        a.silhouette.rotation.y = faceYaw - a.group.rotation.y
+      }
       const hoverIdx = peerHover.get(id) ?? null
       const peekText = peerHoverText.get(id) ?? null
       const cards = peerHands.get(id)
-      if (cards) layoutPeerHand(a, id, cards.length, hoverIdx, peekText)
+      const count = Math.max(cards?.length || 0, room?.phase === 'playing' ? (cards?.length || 7) : 5)
+      layoutPeerHand(a, id, count, hoverIdx, peekText)
     }
 
     for (const [id, cards] of peerHands) {

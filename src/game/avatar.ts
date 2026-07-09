@@ -3,6 +3,7 @@ import * as THREE from 'three'
 export type AvatarHandle = {
   group: THREE.Group
   handAnchor: THREE.Group
+  silhouette: THREE.Group
   setFace: (dataUrl?: string) => void
   setName: (name: string) => void
   setHighlight: (on: boolean) => void
@@ -15,8 +16,8 @@ function makeNameSprite(name: string) {
   c.height = 128
   const ctx = c.getContext('2d')!
   ctx.clearRect(0, 0, c.width, c.height)
-  ctx.fillStyle = 'rgba(42,42,40,0.5)'
-  ctx.font = '500 40px "DM Sans", system-ui, sans-serif'
+  ctx.fillStyle = 'rgba(42,42,40,0.55)'
+  ctx.font = '600 42px "DM Sans", system-ui, sans-serif'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   ctx.fillText(name, c.width / 2, c.height / 2)
@@ -24,109 +25,114 @@ function makeNameSprite(name: string) {
   tex.colorSpace = THREE.SRGBColorSpace
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false })
   const sprite = new THREE.Sprite(mat)
-  sprite.scale.set(0.9, 0.22, 1)
-  sprite.position.y = 1.55
+  sprite.scale.set(0.85, 0.21, 1)
+  sprite.position.y = 1.62
   return sprite
 }
 
-/** Classic XP account-picture silhouette: round head + pear shoulders, fade at feet. */
-function xpSilhouetteTexture(faceDataUrl?: string): Promise<THREE.CanvasTexture> {
-  return new Promise((resolve) => {
-    const c = document.createElement('canvas')
-    c.width = 256
-    c.height = 320
-    const ctx = c.getContext('2d')!
+/** Paint classic XP user-account silhouette onto a canvas (sync). */
+function paintXpSilhouette(ctx: CanvasRenderingContext2D, w: number, h: number, faceImg?: HTMLImageElement) {
+  ctx.clearRect(0, 0, w, h)
 
-    const paint = (faceImg?: HTMLImageElement) => {
-      ctx.clearRect(0, 0, c.width, c.height)
+  const cx = w / 2
+  // Soft vertical fade for the torso (dissolves before "feet")
+  const bodyGrad = ctx.createLinearGradient(0, h * 0.42, 0, h * 0.98)
+  bodyGrad.addColorStop(0, '#b8b8b4')
+  bodyGrad.addColorStop(0.55, '#b0b0ac')
+  bodyGrad.addColorStop(0.82, 'rgba(168,168,164,0.4)')
+  bodyGrad.addColorStop(1, 'rgba(160,160,156,0)')
 
-      const g = ctx.createLinearGradient(0, 40, 0, 310)
-      g.addColorStop(0, 'rgba(176,176,172,1)')
-      g.addColorStop(0.5, 'rgba(168,168,164,0.98)')
-      g.addColorStop(0.78, 'rgba(158,158,154,0.45)')
-      g.addColorStop(1, 'rgba(150,150,146,0)')
+  // Pear shoulders
+  ctx.fillStyle = bodyGrad
+  ctx.beginPath()
+  ctx.moveTo(cx, h * 0.44)
+  ctx.bezierCurveTo(w * 0.22, h * 0.46, w * 0.08, h * 0.58, w * 0.06, h * 0.72)
+  ctx.bezierCurveTo(w * 0.04, h * 0.86, w * 0.18, h * 0.96, cx, h * 0.98)
+  ctx.bezierCurveTo(w * 0.82, h * 0.96, w * 0.96, h * 0.86, w * 0.94, h * 0.72)
+  ctx.bezierCurveTo(w * 0.92, h * 0.58, w * 0.78, h * 0.46, cx, h * 0.44)
+  ctx.closePath()
+  ctx.fill()
 
-      // Shoulders / torso pear
-      ctx.fillStyle = g
-      ctx.beginPath()
-      ctx.moveTo(128, 148)
-      ctx.bezierCurveTo(68, 152, 32, 188, 26, 232)
-      ctx.bezierCurveTo(22, 268, 42, 305, 128, 314)
-      ctx.bezierCurveTo(214, 305, 234, 268, 230, 232)
-      ctx.bezierCurveTo(224, 188, 188, 152, 128, 148)
-      ctx.closePath()
-      ctx.fill()
+  // Round head
+  const hr = w * 0.22
+  const hy = h * 0.28
+  ctx.beginPath()
+  ctx.arc(cx, hy, hr, 0, Math.PI * 2)
+  ctx.fillStyle = '#aeaea9'
+  ctx.fill()
 
-      // Head
-      ctx.beginPath()
-      ctx.arc(128, 96, 60, 0, Math.PI * 2)
-      ctx.fillStyle = '#b0b0ac'
-      ctx.fill()
+  if (faceImg) {
+    ctx.save()
+    ctx.beginPath()
+    ctx.arc(cx, hy, hr * 0.96, 0, Math.PI * 2)
+    ctx.clip()
+    const s = hr * 2
+    ctx.drawImage(faceImg, cx - s / 2, hy - s / 2, s, s)
+    ctx.restore()
+  } else {
+    // Soft highlight like the flat XP glyph
+    const hg = ctx.createRadialGradient(cx - hr * 0.25, hy - hr * 0.3, hr * 0.1, cx, hy, hr)
+    hg.addColorStop(0, 'rgba(220,220,216,0.5)')
+    hg.addColorStop(1, 'rgba(174,174,169,0)')
+    ctx.fillStyle = hg
+    ctx.beginPath()
+    ctx.arc(cx, hy, hr, 0, Math.PI * 2)
+    ctx.fill()
+  }
+}
 
-      if (faceImg) {
-        ctx.save()
-        ctx.beginPath()
-        ctx.arc(128, 96, 58, 0, Math.PI * 2)
-        ctx.clip()
-        // Stretch face across the head circle (XP-style)
-        ctx.drawImage(faceImg, 70, 38, 116, 116)
-        ctx.restore()
-      } else {
-        const hg = ctx.createRadialGradient(112, 78, 6, 128, 96, 60)
-        hg.addColorStop(0, 'rgba(205,205,201,0.4)')
-        hg.addColorStop(1, 'rgba(176,176,172,0)')
-        ctx.fillStyle = hg
-        ctx.beginPath()
-        ctx.arc(128, 96, 60, 0, Math.PI * 2)
-        ctx.fill()
-      }
+function makeXpTexture(faceDataUrl?: string): THREE.CanvasTexture {
+  const c = document.createElement('canvas')
+  c.width = 256
+  c.height = 320
+  const ctx = c.getContext('2d')!
+  paintXpSilhouette(ctx, c.width, c.height)
+  const tex = new THREE.CanvasTexture(c)
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.needsUpdate = true
 
-      const tex = new THREE.CanvasTexture(c)
-      tex.colorSpace = THREE.SRGBColorSpace
+  if (faceDataUrl) {
+    const img = new Image()
+    img.onload = () => {
+      paintXpSilhouette(ctx, c.width, c.height, img)
       tex.needsUpdate = true
-      resolve(tex)
     }
-
-    if (faceDataUrl) {
-      const img = new Image()
-      img.onload = () => paint(img)
-      img.onerror = () => paint()
-      img.src = faceDataUrl
-    } else {
-      paint()
-    }
-  })
+    img.src = faceDataUrl
+  }
+  return tex
 }
 
 /**
- * Windows XP user-account icon: camera-facing soft silhouette (not a cylinder+ball).
- * Cards attach to a 3D hand anchor that faces the table.
+ * Windows XP user-account icon: soft gray silhouette (round head + pear shoulders).
+ * Uses a double-sided plane so it always reads at the table, plus a 3D hand anchor.
  */
 export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
   const group = new THREE.Group()
 
-  const silMat = new THREE.SpriteMaterial({
+  const silGroup = new THREE.Group()
+  const silTex = makeXpTexture(faceDataUrl)
+  const silMat = new THREE.MeshBasicMaterial({
+    map: silTex,
     transparent: true,
-    depthTest: true,
     depthWrite: false,
+    side: THREE.DoubleSide,
   })
-  const sil = new THREE.Sprite(silMat)
-  sil.scale.set(1.05, 1.3, 1)
-  sil.position.y = 0.78
-  group.add(sil)
+  const sil = new THREE.Mesh(new THREE.PlaneGeometry(1.15, 1.44), silMat)
+  sil.position.y = 0.85
+  sil.rotation.x = -0.08
+  silGroup.add(sil)
 
-  let silTex: THREE.Texture | null = null
-  void xpSilhouetteTexture(faceDataUrl).then((tex) => {
-    silTex = tex
-    silMat.map = tex
-    silMat.needsUpdate = true
-  })
+  const sil2 = new THREE.Mesh(new THREE.PlaneGeometry(1.12, 1.4), silMat.clone())
+  sil2.position.set(0, 0.85, -0.04)
+  sil2.rotation.x = -0.08
+  silGroup.add(sil2)
+  group.add(silGroup)
 
   let nameSprite = makeNameSprite(name)
   group.add(nameSprite)
 
   const ring = new THREE.Mesh(
-    new THREE.RingGeometry(0.28, 0.34, 32),
+    new THREE.RingGeometry(0.3, 0.36, 32),
     new THREE.MeshBasicMaterial({
       color: '#9a9a94',
       transparent: true,
@@ -138,19 +144,18 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
   ring.position.y = 0.02
   group.add(ring)
 
-  // Cards held at chest, toward table center (group yaw handles facing)
   const handAnchor = new THREE.Group()
-  handAnchor.position.set(0, 0.72, 0.32)
-  handAnchor.rotation.x = -0.45
+  handAnchor.position.set(0, 0.78, 0.36)
+  handAnchor.rotation.x = -0.5
   group.add(handAnchor)
 
   function setFace(dataUrl?: string) {
-    void xpSilhouetteTexture(dataUrl).then((tex) => {
-      silTex?.dispose()
-      silTex = tex
-      silMat.map = tex
-      silMat.needsUpdate = true
-    })
+    const next = makeXpTexture(dataUrl)
+    silTex.dispose()
+    silMat.map = next
+    silMat.needsUpdate = true
+    ;(sil2.material as THREE.MeshBasicMaterial).map = next
+    ;(sil2.material as THREE.MeshBasicMaterial).needsUpdate = true
   }
 
   function setName(n: string) {
@@ -162,12 +167,11 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
   }
 
   function setHighlight(on: boolean) {
-    ;(ring.material as THREE.MeshBasicMaterial).opacity = on ? 0.5 : 0
+    ;(ring.material as THREE.MeshBasicMaterial).opacity = on ? 0.55 : 0
   }
 
   function dispose() {
-    silTex?.dispose()
-    silMat.dispose()
+    silTex.dispose()
     group.traverse((obj) => {
       if ((obj as THREE.Mesh).isMesh) {
         const m = obj as THREE.Mesh
@@ -184,5 +188,5 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
     })
   }
 
-  return { group, handAnchor, setFace, setName, setHighlight, dispose }
+  return { group, handAnchor, silhouette: silGroup, setFace, setName, setHighlight, dispose }
 }
