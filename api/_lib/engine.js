@@ -93,6 +93,7 @@ function blankRoom({ code, name, hostId, packIds, maxPlayers }) {
     hover: {},
     hoverText: {},
     drag: null,
+    dragSequences: {},
     tablePositions: [],
     roundPlayerIds: [],
     nextSubmissionSeq: 0,
@@ -630,9 +631,22 @@ function applyAction(room, action) {
       }
       break
     case 'drag_card':
-      room.drag = action.drag
-        ? { ...action.drag, playerId }
-        : null
+      {
+        room.dragSequences = room.dragSequences || {}
+        const lastSequence = room.dragSequences[playerId] || 0
+        const requestedSequence = Number(action.sequence)
+        const sequence = Number.isFinite(requestedSequence)
+          ? requestedSequence
+          : lastSequence + 1
+        if (sequence > lastSequence) {
+          room.dragSequences[playerId] = sequence
+          room.drag = action.drag
+            ? { ...action.drag, playerId }
+            : room.drag?.playerId === playerId
+              ? null
+              : room.drag
+        }
+      }
       break
     case 'move_table_card': {
       if (room.phase !== 'playing') throw new Error('Played cards are locked')

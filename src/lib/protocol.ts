@@ -97,7 +97,7 @@ export type ClientMsg =
   | { type: 'add_bot' }
   | { type: 'play_cards'; cards: string[]; positions?: { x: number; z: number; rotY?: number }[] }
   | { type: 'hover_card'; cardIndex: number | null; cardText?: string | null }
-  | { type: 'drag_card'; drag: CardDrag | null }
+  | { type: 'drag_card'; drag: CardDrag | null; sequence?: number }
   | { type: 'move_table_card'; key: string; x: number; z: number; rotY?: number }
   | { type: 'vote'; submissionPlayerId: string }
   | { type: 'next_round' }

@@ -150,3 +150,36 @@ test('wrong-phase actions fail instead of silently desynchronizing the client', 
     /play phase/,
   )
 })
+
+test('an out-of-order drag update cannot resurrect a dropped ghost card', () => {
+  const room = roomWithPlayers()
+  const drag = {
+    playerId: 'p1',
+    cardText: 'A test card',
+    source: 'hand',
+    x: 0.1,
+    y: 0.2,
+    z: 0.3,
+  }
+  applyAction(room, {
+    type: 'drag_card',
+    playerId: 'p1',
+    sequence: 1,
+    drag,
+  })
+  applyAction(room, {
+    type: 'drag_card',
+    playerId: 'p1',
+    sequence: 2,
+    drag: null,
+  })
+  applyAction(room, {
+    type: 'drag_card',
+    playerId: 'p1',
+    sequence: 1,
+    drag,
+  })
+
+  assert.equal(room.drag, null)
+  assert.equal(room.dragSequences.p1, 2)
+})

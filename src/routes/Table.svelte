@@ -25,6 +25,7 @@
   let hoverTimer: ReturnType<typeof setTimeout> | null = null
   let dragTimer: ReturnType<typeof setTimeout> | null = null
   let lastDragSent = 0
+  let dragSequence = 0
   /** Optimistic vote while waiting for server */
   let pendingVoteId = $state<string | null>(null)
   let voteBusyId = $state<string | null>(null)
@@ -116,17 +117,27 @@
         }, 60)
       }
       scene.onDragCard = (drag) => {
-        const now = performance.now()
-        if (drag && now - lastDragSent < 45) {
+        const dragNow = performance.now()
+        if (!drag) {
+          if (dragTimer) {
+            clearTimeout(dragTimer)
+            dragTimer = null
+          }
+          lastDragSent = dragNow
+          sendDrag(null)
+          return
+        }
+        if (dragNow - lastDragSent < 80) {
           if (dragTimer) clearTimeout(dragTimer)
           dragTimer = setTimeout(() => {
             lastDragSent = performance.now()
-            void send({ type: 'drag_card', drag }).catch(() => {})
-          }, 80)
+            dragTimer = null
+            sendDrag(drag)
+          }, Math.max(16, 80 - (dragNow - lastDragSent)))
           return
         }
-        lastDragSent = now
-        void send({ type: 'drag_card', drag }).catch(() => {})
+        lastDragSent = dragNow
+        sendDrag(drag)
       }
       scene.onMoveTableCard = (key, x, z, rotY) => {
         void send({ type: 'move_table_card', key, x, z, rotY }).catch(() => {})
@@ -208,6 +219,11 @@
 
   function send(msg: ClientMsg) {
     return transport?.send(msg) ?? Promise.resolve(undefined)
+  }
+
+  function sendDrag(drag: Parameters<NonNullable<TableSceneApi['onDragCard']>>[0]) {
+    dragSequence += 1
+    void send({ type: 'drag_card', drag, sequence: dragSequence }).catch(() => {})
   }
 
   async function castVote(submissionPlayerId: string) {
@@ -304,6 +320,8 @@
           You’re the Card Czar — wait while others play
         {:else if iAlreadyPlayed}
           ✓ Play locked in
+        {:else if stagedCount >= (room.blackCard?.pick || 1)}
+          Submitting your play…
         {:else if stagedCount > 0}
           {stagedCount}/{room.blackCard?.pick || 1} cards placed · drag the rest
         {:else if (room.blackCard?.pick || 1) > 1}
