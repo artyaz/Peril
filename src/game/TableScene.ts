@@ -48,17 +48,20 @@ type LocalDrag = {
 }
 
 const TABLE_Y = 1.55
-const TABLE_RADIUS = 0.42
-const HAND_ZONE_Y = 0.48
+const TABLE_RADIUS = 0.48
+const HAND_ZONE_Y = 0.52
 const DRAG_BROADCAST_MS = 40
 const CLICK_MOVE_PX = 6
 /** Feet Y so chest sits at the rim and head is clearly above the table. */
-const AVATAR_SIT_Y = TABLE_Y - 0.36
+const AVATAR_SIT_Y = TABLE_Y - 0.28
 /** Spring feel for pointer-follow while dragging. */
 const DRAG_STIFF = 420
 const DRAG_DAMP = 34
-const HAND_GROUP_Y = TABLE_Y + 0.08
-const HAND_GROUP_Z = 0.55
+const HAND_GROUP_Y = TABLE_Y + 0.06
+const HAND_GROUP_Z = 0.62
+/** Wider base FOV; table peek only narrows slightly for readability. */
+const FOV_HAND = 56
+const FOV_TABLE = 44
 
 export function createTableScene(): TableSceneApi {
   let threeRenderer: THREE.WebGLRenderer | null = null
@@ -114,12 +117,11 @@ export function createTableScene(): TableSceneApi {
   /** Staged local drops before submitting (for pick > 1) */
   let stagedPlays: { text: string; x: number; z: number; rotY: number; card: CardMesh }[] = []
 
-  // Hand: camera looks at the fan in the lower viewport.
-  // Table peek: close overhead so card text is readable.
-  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.32, 0.78)
-  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.1, 0.48)
-  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 0.28, 0.26)
-  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + TABLE_CARD_Y, 0.02)
+  // Hand: pull back so the full fan fits; table: mild overhead, not glued to the surface.
+  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.42, 0.98)
+  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.08, 0.42)
+  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 0.72, 0.58)
+  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + TABLE_CARD_Y, -0.02)
 
   function ensureHitbox(card: CardMesh) {
     if (card.getObjectByName('hitbox')) return
@@ -159,7 +161,7 @@ export function createTableScene(): TableSceneApi {
     scene.background = new THREE.Color('#e6e6e2')
     scene.fog = new THREE.Fog('#e6e6e2', 10, 32)
 
-    camera = new THREE.PerspectiveCamera(48, 1, 0.05, 60)
+    camera = new THREE.PerspectiveCamera(FOV_HAND, 1, 0.05, 60)
     camera.position.copy(handCamPos)
     camera.lookAt(handCamTarget)
 
@@ -454,18 +456,18 @@ export function createTableScene(): TableSceneApi {
     }
 
     const n = handCards.length
-    // Readable fan with comfortable hitboxes
-    const spread = Math.min(0.095, 0.72 / Math.max(n, 1))
+    // Wider fan so all 7 cards stay in frame without heavy overlap
+    const spread = Math.min(0.118, 0.86 / Math.max(n, 1))
     const start = -((n - 1) * spread) / 2
     handCards.forEach((card, i) => {
       if (card.userData.dragging) return
       const mid = (n - 1) / 2
       card.position.x = start + i * spread
-      card.position.z = 0.006 * Math.abs(i - mid)
+      card.position.z = 0.008 * Math.abs(i - mid)
       card.userData.baseY = 0
-      card.userData.baseRotX = -0.22
-      card.userData.baseRotY = (i - mid) * -0.028
-      card.userData.baseRotZ = (i - mid) * -0.012
+      card.userData.baseRotX = -0.28
+      card.userData.baseRotY = (i - mid) * -0.032
+      card.userData.baseRotZ = (i - mid) * -0.014
       card.rotation.x = card.userData.baseRotX
       card.rotation.y = card.userData.baseRotY
       card.rotation.z = card.userData.baseRotZ
@@ -493,7 +495,7 @@ export function createTableScene(): TableSceneApi {
     }
     while (cards.length < handCount) {
       const card = createCard('Peril', 'back')
-      card.scale.setScalar(0.62)
+      card.scale.setScalar(0.78)
       const i = cards.length
       card.userData.index = i
       handle.handAnchor.add(card)
@@ -501,17 +503,18 @@ export function createTableScene(): TableSceneApi {
     }
 
     const n = cards.length
-    const spread = Math.min(0.072, 0.42 / Math.max(n, 1))
+    // Match local upright fan — held toward the table, not flat on it
+    const spread = Math.min(0.09, 0.58 / Math.max(n, 1))
     const start = -((n - 1) * spread) / 2
     cards.forEach((card, i) => {
       const mid = (n - 1) / 2
       const isPeek = hoverIdx === i
       card.position.x = start + i * spread
-      card.position.z = isPeek ? 0.08 : 0.02
-      card.userData.baseY = isPeek ? 0.1 : 0.02
-      card.userData.baseRotX = isPeek ? -0.95 : -1.15
-      card.userData.baseRotY = (i - mid) * 0.035
-      card.userData.baseRotZ = (i - mid) * 0.022
+      card.position.z = isPeek ? 0.04 : 0.01 * Math.abs(i - mid)
+      card.userData.baseY = isPeek ? 0.06 : 0
+      card.userData.baseRotX = isPeek ? -0.18 : -0.32
+      card.userData.baseRotY = (i - mid) * -0.03
+      card.userData.baseRotZ = (i - mid) * -0.012
       swapPeerCardFace(card, isPeek ? peekText : null, isPeek)
     })
   }
@@ -538,9 +541,9 @@ export function createTableScene(): TableSceneApi {
     const peerLayouts: SeatLayout[] = peers.map((_, i) => {
       const n = peers.length
       const t = n === 1 ? 0.5 : i / (n - 1)
-      // Tight arc just outside the rim — seated at the table
-      const angle = -0.95 + t * 1.9
-      const dist = TABLE_RADIUS + 0.12
+      // Wider arc across the far side so heads stay in both hand + table FOV
+      const angle = -1.15 + t * 2.3
+      const dist = TABLE_RADIUS + 0.22
       return {
         position: new THREE.Vector3(Math.sin(angle) * dist, 0, -Math.cos(angle) * dist),
         yaw: Math.atan2(-Math.sin(angle), Math.cos(angle)),
@@ -622,9 +625,9 @@ export function createTableScene(): TableSceneApi {
       blackCard.userData.baseRotY = 0
       blackCard.userData.baseRotZ = 0
       blackCard.rotation.x = TABLE_FACE_UP_X
-      blackCard.position.set(0, TABLE_CARD_Y, -0.06)
+      blackCard.position.set(0, TABLE_CARD_Y, -0.1)
       blackCard.userData.baseY = TABLE_CARD_Y
-      blackCard.scale.setScalar(0.95)
+      blackCard.scale.setScalar(1)
       tableGroup.add(blackCard)
       dropCard(blackCard, 0.8, TABLE_CARD_Y)
       blackCard.userData.lift.velocity = -2.5
@@ -689,8 +692,8 @@ export function createTableScene(): TableSceneApi {
     subs.forEach((sub, i) => {
       const n = subs.length
       const t = n === 1 ? 0.5 : i / (n - 1)
-      const arcX = (t - 0.5) * 0.28
-      const arcZ = 0.06
+      const arcX = (t - 0.5) * 0.34
+      const arcZ = 0.08
       sub.cards.forEach((text, ci) => {
         const key = cardKeyFor(sub.playerId, ci, text)
         nextKeys.add(key)
@@ -698,7 +701,7 @@ export function createTableScene(): TableSceneApi {
         const hasServerPos = !!pos
         const ox =
           pos?.x ??
-          arcX + (ci - (sub.cards.length - 1) / 2) * (CARD_W * scale * 0.55)
+          arcX + (ci - (sub.cards.length - 1) / 2) * (CARD_W * scale * 0.62)
         const oz = pos?.z ?? arcZ
         const rotY = pos?.rotY ?? Math.sin(i * 7.1 + ci) * 0.5 * 0.16
         desired.push({
@@ -742,6 +745,12 @@ export function createTableScene(): TableSceneApi {
         if (!card || card.userData.dragging) continue
         card.userData.selectable = state.phase === 'voting'
         card.userData.submissionPlayerId = d.playerId
+        const myVote = state.votes?.[localId]
+        const isVoted = state.phase === 'voting' && myVote === d.playerId
+        const isWinner =
+          (state.phase === 'scoring' || state.phase === 'ended') &&
+          state.winnerId === d.playerId
+        applyVoteGlow(card, isVoted, isWinner)
         const toY = TABLE_CARD_Y + d.subIndex * 0.002
         card.userData.baseY = toY
         if (d.hasServerPos) {
@@ -815,6 +824,12 @@ export function createTableScene(): TableSceneApi {
       card.userData.submissionPlayerId = d.playerId
       card.userData.index = d.subIndex
       card.userData.selectable = state.phase === 'voting'
+      const myVote = state.votes?.[localId]
+      const isVoted = state.phase === 'voting' && myVote === d.playerId
+      const isWinner =
+        (state.phase === 'scoring' || state.phase === 'ended') &&
+        state.winnerId === d.playerId
+      applyVoteGlow(card, isVoted, isWinner)
 
       const toY = TABLE_CARD_Y + d.subIndex * 0.002
       const draggingThis =
@@ -901,6 +916,20 @@ export function createTableScene(): TableSceneApi {
     tableCards = newCards
     tableGroup.userData.subIdentitySig = identitySig
     knownSubKeys = nextKeys
+  }
+
+  function applyVoteGlow(card: CardMesh, voted: boolean, winner: boolean) {
+    const mats = card.material as THREE.MeshStandardMaterial[]
+    const emissive = winner ? '#3a5a32' : voted ? '#2a4a6a' : '#000000'
+    const intensity = winner ? 0.35 : voted ? 0.28 : 0
+    for (const m of mats) {
+      if (!m || !('emissive' in m)) continue
+      m.emissive = new THREE.Color(emissive)
+      m.emissiveIntensity = intensity
+    }
+    if (voted || winner) {
+      card.userData.baseY = Math.max(card.userData.baseY, TABLE_CARD_Y + 0.012)
+    }
   }
 
   function applyGhost(drag: CardDrag | null) {
@@ -1254,10 +1283,16 @@ export function createTableScene(): TableSceneApi {
     if (!camera || !threeRenderer || !root) return
     updatePointerFromEvent(ev)
 
-    // Map upper half → full table overview with a snappy ease-in
+    // Map upper half → table overview; during voting, bias toward the table
     const raw = THREE.MathUtils.clamp((HAND_ZONE_Y - pointerScreenY) / 0.4, 0, 1)
-    const tableAmount = raw * raw // ease toward table so tilt reads clearly
-    camBlend.center = lookClose ? Math.max(tableAmount, 0.95) : tableAmount
+    const tableAmount = raw * raw
+    const phaseBias =
+      room?.phase === 'voting' || room?.phase === 'scoring' || room?.phase === 'revealing'
+        ? 0.55
+        : 0
+    camBlend.center = lookClose
+      ? Math.max(tableAmount, 0.95)
+      : Math.max(tableAmount, phaseBias)
     if (tableAmount > 0.04 || lookClose) {
       camPanX.center = THREE.MathUtils.clamp(pointerNdc.x, -1, 1) * 0.35
       camPanZ.center = THREE.MathUtils.clamp(0.4 - pointerScreenY, -0.4, 0.4) * 0.2
@@ -1455,8 +1490,8 @@ export function createTableScene(): TableSceneApi {
       baseTarget.z += camPanZ.value * 0.15
       camera.position.copy(basePos)
       camera.lookAt(baseTarget)
-      // Closer FOV when peeking so text fills the view
-      camera.fov = THREE.MathUtils.lerp(46, 30, t)
+      // Slightly wider FOV overall; table peek only tightens a little
+      camera.fov = THREE.MathUtils.lerp(FOV_HAND, FOV_TABLE, t)
       camera.updateProjectionMatrix()
     }
 
@@ -1477,10 +1512,16 @@ export function createTableScene(): TableSceneApi {
     })
 
     const inTableZone = lookClose || zoneFromPointer(pointerScreenY) === 'table'
+    const voting = room?.phase === 'voting'
     tableCards.forEach((c) => {
       if (c.userData.dragging) return
       const hovered = inTableZone && hoveredIndex === c.userData.index
-      updateCardMotion(c, dt, hovered, false, { lift: 0.028, tiltX: 0 })
+      const voted =
+        voting && localId && room?.votes?.[localId] === c.userData.submissionPlayerId
+      updateCardMotion(c, dt, hovered || !!voted, false, {
+        lift: voting ? (hovered ? 0.045 : voted ? 0.03 : 0.012) : 0.028,
+        tiltX: 0,
+      })
       c.rotation.x = c.userData.baseRotX
     })
     if (blackCard) {

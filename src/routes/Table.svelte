@@ -25,11 +25,29 @@
     !room ? '…' :
     room.phase === 'lobby' ? 'Lobby' :
     room.phase === 'playing' ? (room.czarId === session?.id ? 'You are Card Czar' : 'Play your cards') :
-    room.phase === 'voting' ? 'Vote for the best' :
+    room.phase === 'voting' ? 'Vote for the funniest' :
     room.phase === 'scoring' ? 'Round result' :
     room.phase === 'ended' ? 'Game over' :
     room.phase,
   )
+
+  const myVote = $derived(
+    room && session ? room.votes?.[session.id] ?? null : null,
+  )
+
+  const voteTargetName = $derived(
+    myVote && room ? room.players.find((p) => p.id === myVote)?.name || 'a play' : null,
+  )
+
+  const voteProgress = $derived.by(() => {
+    if (!room || room.phase !== 'voting') return null
+    const state = room
+    const onlySelf =
+      state.submissions.length === 1 ? state.submissions[0].playerId : null
+    const eligible = state.players.filter((p) => p.id !== onlySelf)
+    const cast = eligible.filter((p) => state.votes?.[p.id]).length
+    return { cast, total: eligible.length }
+  })
 
   onMount(() => {
     if (!session?.name) {
@@ -150,32 +168,62 @@
 
   <aside class="scores fade-in">
     {#each room?.players || [] as p}
-      <div class="score" class:you={p.id === session?.id} class:czar={p.id === room?.czarId}>
-        <span>{p.name}</span>
+      <div
+        class="score"
+        class:you={p.id === session?.id}
+        class:czar={p.id === room?.czarId}
+        class:voted={room?.phase === 'voting' && room.votes?.[p.id]}
+      >
+        <span class="score-name">
+          {#if p.id === room?.czarId}<span class="czar-mark" title="Card Czar">★</span>{/if}
+          {p.name}
+        </span>
         <b>{p.score}</b>
       </div>
     {/each}
   </aside>
 
   {#if room?.phase === 'playing'}
-    <div class="hint">
-      {#if room.czarId === session?.id}
-        Waiting for plays…
-      {:else if (room.blackCard?.pick || 1) > 1}
-        Drop {(room.blackCard?.pick || 1)} cards onto the table
-      {:else}
-        Pull a card up to the table, then drop it
-      {/if}
+    <div class="hint-stack fade-in">
+      <div class="hint">
+        {#if room.czarId === session?.id}
+          You’re the Card Czar — wait while others play
+        {:else if (room.blackCard?.pick || 1) > 1}
+          Drag {(room.blackCard?.pick || 1)} cards onto the table
+        {:else}
+          Drag a card onto the table to play
+        {/if}
+      </div>
+      <div class="hint-sub">Move the pointer up to look at the table</div>
     </div>
   {/if}
 
   {#if room?.phase === 'voting'}
-    <div class="hint">Drag cards around · click a play to vote</div>
+    <div class="hint-stack fade-in vote-panel">
+      <div class="hint vote-title">
+        {#if myVote}
+          You voted for {voteTargetName}
+        {:else}
+          Click a white card on the table to vote
+        {/if}
+      </div>
+      <div class="hint-sub">
+        Most votes wins · Card Czar breaks ties
+        {#if voteProgress}
+          · {voteProgress.cast}/{voteProgress.total} voted
+        {/if}
+      </div>
+      {#if myVote}
+        <div class="hint-sub soft">Click another play to change your vote</div>
+      {/if}
+    </div>
   {/if}
 
   {#if room?.phase === 'scoring'}
     <div class="banner fade-in">
+      <div class="banner-kicker">Most votes</div>
       <div class="banner-title">{winnerName(room.winnerId)} wins the round</div>
+      <div class="banner-sub">+1 point · first to 5 wins the game</div>
       <button class="primary" onclick={nextRound}>Next round</button>
     </div>
   {/if}
@@ -227,16 +275,42 @@
     gap: 0.4rem;
     pointer-events: none;
   }
-  .hint {
+  .hint-stack {
     position: absolute;
     z-index: 2;
-    bottom: 1.1rem;
+    bottom: 1.15rem;
     left: 50%;
     transform: translateX(-50%);
-    color: var(--mute);
-    font-size: 0.85rem;
-    letter-spacing: 0.02em;
+    text-align: center;
     pointer-events: none;
+    display: grid;
+    gap: 0.25rem;
+    width: min(28rem, calc(100% - 2rem));
+  }
+  .hint-stack.vote-panel {
+    padding: 0.85rem 1.1rem;
+    border-radius: 16px;
+    background: rgba(250, 250, 248, 0.82);
+    backdrop-filter: blur(10px);
+    box-shadow: 0 12px 32px rgba(40, 40, 36, 0.1);
+  }
+  .hint {
+    color: var(--ink);
+    font-size: 0.95rem;
+    letter-spacing: 0.01em;
+    pointer-events: none;
+  }
+  .hint.vote-title {
+    font-family: "Instrument Serif", Georgia, serif;
+    font-size: 1.25rem;
+  }
+  .hint-sub {
+    color: var(--mute);
+    font-size: 0.8rem;
+    letter-spacing: 0.02em;
+  }
+  .hint-sub.soft {
+    opacity: 0.85;
   }
   .prompt {
     pointer-events: none;
@@ -288,19 +362,31 @@
     display: flex;
     justify-content: space-between;
     gap: 1rem;
-    min-width: 8rem;
-    padding: 0.45rem 0.7rem;
-    border-radius: 999px;
-    background: rgba(250, 250, 248, 0.7);
+    min-width: 8.5rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 14px;
+    background: rgba(250, 250, 248, 0.78);
     backdrop-filter: blur(8px);
     font-size: 0.85rem;
     box-shadow: 0 6px 18px var(--shadow);
+    transition: outline-color 200ms ease, background 200ms ease;
   }
-  .score.you { outline: 1px solid rgba(42,42,40,.25); }
-  .score.czar b::after {
-    content: ' ★';
-    font-weight: 400;
+  .score-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
+  }
+  .czar-mark {
     color: var(--mute);
+    font-size: 0.75rem;
+  }
+  .score.you { outline: 1px solid rgba(42,42,40,.28); }
+  .score.voted {
+    background: rgba(232, 240, 248, 0.9);
+  }
+  .score.czar b::after {
+    content: none;
   }
   .banner {
     position: absolute;
@@ -315,12 +401,23 @@
     backdrop-filter: blur(12px);
     box-shadow: 0 24px 60px rgba(40,40,36,.12);
     display: grid;
-    gap: 1rem;
+    gap: 0.55rem;
     justify-items: center;
+  }
+  .banner-kicker {
+    font-size: 0.72rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--mute);
   }
   .banner-title {
     font-family: "Instrument Serif", Georgia, serif;
     font-size: 1.8rem;
+  }
+  .banner-sub {
+    color: var(--mute);
+    font-size: 0.88rem;
+    margin-bottom: 0.4rem;
   }
   .err {
     position: absolute;
