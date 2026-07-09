@@ -1,12 +1,16 @@
 import * as THREE from 'three'
 import { Spring } from '../lib/motion'
 
-/** Small, thin cards — overlap in hand; peek lifts on hover. */
+/** Small, thin cards — slight overlap in hand; peek lifts on hover. */
 export const CARD_W = 0.12
 export const CARD_H = 0.168
 export const CARD_D = 0.0018
-/** Rest height above table surface so cards don't sink (surface top ≈ 0.025). */
-export const TABLE_CARD_Y = 0.042
+/** Table surface is a 0.05-tall cylinder centered at y=0 → top at 0.025. */
+export const TABLE_SURFACE_TOP = 0.025
+/** Card center Y so the underside rests flush on the surface (not sunk, not floating). */
+export const TABLE_CARD_Y = TABLE_SURFACE_TOP + CARD_D / 2 + 0.0004
+/** Face-up flat on table: +Z face points up after this X rotation. */
+export const TABLE_FACE_UP_X = Math.PI / 2
 
 const canvasCache = new Map<string, THREE.CanvasTexture>()
 
@@ -125,6 +129,7 @@ export type CardMesh = THREE.Mesh & {
     submissionPlayerId?: string
     cardKey?: string
     dragging?: boolean
+    pinned?: boolean
   }
 }
 
