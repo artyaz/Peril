@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import { createRoom, getRoom, rooms, attachClient } from './room.js'
+import apiHandler from '../api/rooms.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -48,7 +49,6 @@ function serveStatic(req, res) {
     return
   }
   if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) {
-    // SPA fallback
     const index = path.join(DIST, 'index.html')
     if (fs.existsSync(index)) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
@@ -60,6 +60,21 @@ function serveStatic(req, res) {
   }
   res.writeHead(200, { 'Content-Type': contentType(file) })
   fs.createReadStream(file).pipe(res)
+}
+
+/** Adapt Node req/res to the Vercel-style api/rooms handler. */
+function runApi(req, res) {
+  return apiHandler(req, {
+    setHeader: (k, v) => res.setHeader(k, v),
+    get statusCode() { return res.statusCode },
+    set statusCode(v) { res.statusCode = v },
+    end: (body) => {
+      if (!res.headersSent) {
+        res.setHeader('Content-Type', res.getHeader('Content-Type') || 'application/json')
+      }
+      res.end(body)
+    },
+  })
 }
 
 const server = http.createServer(async (req, res) => {
@@ -74,7 +89,13 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, { ip })
   }
 
-  if (url.pathname === '/api/rooms' && req.method === 'GET') {
+  // Unified Vercel-compatible rooms API (create/join/state/act)
+  if (url.pathname === '/api/rooms') {
+    return runApi(req, res)
+  }
+
+  // Legacy list endpoint
+  if (url.pathname === '/api/rooms/list' && req.method === 'GET') {
     const list = [...rooms.values()].map((r) => ({
       code: r.code,
       name: r.name,
@@ -83,31 +104,6 @@ const server = http.createServer(async (req, res) => {
       maxPlayers: r.maxPlayers,
     }))
     return sendJson(res, 200, { rooms: list })
-  }
-
-  if (url.pathname === '/api/rooms' && req.method === 'POST') {
-    let body = ''
-    for await (const chunk of req) body += chunk
-    try {
-      const data = JSON.parse(body || '{}')
-      const room = createRoom({
-        name: String(data.name || 'Untitled').slice(0, 40),
-        hostId: String(data.hostId || ''),
-        packIds: Array.isArray(data.packIds) ? data.packIds.slice(0, 40) : ['cah-base-set'],
-        maxPlayers: Math.min(4, Math.max(2, Number(data.maxPlayers) || 4)),
-        code: data.code ? String(data.code).toUpperCase() : undefined,
-      })
-      return sendJson(res, 200, { code: room.code, name: room.name })
-    } catch (e) {
-      return sendJson(res, 400, { error: e.message || 'bad request' })
-    }
-  }
-
-  if (url.pathname.startsWith('/api/rooms/') && req.method === 'GET') {
-    const code = url.pathname.split('/').pop()?.toUpperCase()
-    const room = code ? getRoom(code) : null
-    if (!room) return sendJson(res, 404, { error: 'Room not found' })
-    return sendJson(res, 200, room.publicMeta())
   }
 
   if (isProd) return serveStatic(req, res)

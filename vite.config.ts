@@ -6,6 +6,7 @@ function stripLazyCssFromHtml(): Plugin {
     name: 'strip-lazy-css-from-html',
     enforce: 'post',
     transformIndexHtml(html) {
+      // Keep only boot/index CSS in the HTML shell; page CSS loads with chunks.
       return html
         .replace(/<link rel="stylesheet"[^>]*href="\/assets\/page-[^"]+"[^>]*>\n?/g, '')
         .replace(/<link rel="stylesheet"[^>]*href="\/assets\/App-[^"]+"[^>]*>\n?/g, '')
@@ -13,23 +14,24 @@ function stripLazyCssFromHtml(): Plugin {
   }
 }
 
-/** Keep the entry chunk free of static imports to lazy pages (Vite preload helper). */
+/**
+ * Vite injects a CSS preload helper as a static import from a random chunk.
+ * Replace it with a tiny local helper so the entry stays tiny and CSS still loads
+ * via the dynamic import() mapDeps path.
+ */
 function isolateEntry(): Plugin {
   return {
     name: 'isolate-entry',
     generateBundle(_opts, bundle) {
       for (const chunk of Object.values(bundle)) {
         if (chunk.type !== 'chunk' || !chunk.isEntry) continue
-        // Replace `import{n as e}from"./something.js";` preload helper with local no-op
+        // Local preload helper that also injects CSS link tags from mapDeps.
+        const helper = `const __perilPreload=(loader,deps=[])=>{if(typeof document!=='undefined'){for(const d of deps){if(!d.endsWith('.css'))continue;const href='/' + d;if(document.querySelector('link[href="'+href+'"]'))continue;const l=document.createElement('link');l.rel='stylesheet';l.href=href;document.head.appendChild(l)}}return loader()};`
         chunk.code = chunk.code.replace(
           /import\{n as (\w+)\}from"\.\/[^"]+";/,
-          'const $1=(t)=>t();',
+          `${helper}const $1=__perilPreload;`,
         )
-        // Drop static imports that are only for preload; keep dynamic import() calls
-        chunk.imports = chunk.imports.filter((id) => {
-          // imports array uses file names; clear non-runtime static deps from metadata
-          return id.includes('rolldown-runtime')
-        })
+        chunk.imports = chunk.imports.filter((id) => id.includes('rolldown-runtime'))
       }
     },
   }

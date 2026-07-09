@@ -13,6 +13,26 @@ export type PlayedSubmission = {
   playerId: string
   cards: string[]
   revealed: boolean
+  /** Drop positions on the table (local table-space xz) */
+  positions?: { x: number; z: number; rotY?: number }[]
+}
+
+export type TableCardPos = {
+  key: string
+  x: number
+  z: number
+  rotY: number
+}
+
+/** Live drag of a card (hand→table or rearrange on table) — visible to all peers */
+export type CardDrag = {
+  playerId: string
+  cardText: string
+  source: 'hand' | 'table'
+  key?: string
+  x: number
+  z: number
+  y: number
 }
 
 export type RoomPhase =
@@ -39,6 +59,15 @@ export type RoomState = {
   votes: Record<string, string> // voterId -> submission playerId
   winnerId: string | null
   round: number
+  updatedAt?: number
+  /** playerId → hovered card index (or null) — synced so peers see peeks */
+  hover?: Record<string, number | null>
+  /** playerId → text of the card currently being peeked (if any) */
+  hoverText?: Record<string, string | null>
+  /** Live card drag shared with peers */
+  drag?: CardDrag | null
+  /** Free positions of cards currently on the table */
+  tablePositions?: TableCardPos[]
   you?: {
     hand: string[]
     selected: string[]
@@ -51,8 +80,10 @@ export type ClientMsg =
   | { type: 'set_face'; faceDataUrl: string }
   | { type: 'start' }
   | { type: 'add_bot' }
-  | { type: 'play_cards'; cards: string[] }
-  | { type: 'hover_card'; cardIndex: number | null }
+  | { type: 'play_cards'; cards: string[]; positions?: { x: number; z: number; rotY?: number }[] }
+  | { type: 'hover_card'; cardIndex: number | null; cardText?: string | null }
+  | { type: 'drag_card'; drag: CardDrag | null }
+  | { type: 'move_table_card'; key: string; x: number; z: number; rotY?: number }
   | { type: 'vote'; submissionPlayerId: string }
   | { type: 'next_round' }
   | { type: 'czar_pick'; submissionPlayerId: string }
@@ -61,7 +92,8 @@ export type ClientMsg =
 export type ServerMsg =
   | { type: 'state'; state: RoomState }
   | { type: 'error'; message: string }
-  | { type: 'peer_hover'; playerId: string; cardIndex: number | null }
+  | { type: 'peer_hover'; playerId: string; cardIndex: number | null; cardText?: string | null }
+  | { type: 'peer_drag'; drag: CardDrag | null }
   | { type: 'ip'; ip: string }
   | { type: 'joined'; playerId: string; code: string }
 

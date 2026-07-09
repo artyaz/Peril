@@ -3,7 +3,8 @@
   import { route, navigate } from '../lib/router'
   import { loadSession, saveSession } from '../lib/session'
   import { loadPackIndex, type PackMeta } from '../lib/packs'
-  import { wsUrl, type RoomState, type ServerMsg, type ClientMsg } from '../lib/protocol'
+  import type { RoomState, ClientMsg, ServerMsg } from '../lib/protocol'
+  import { connectRoom, type RoomTransport } from '../lib/transport'
 
   const r = $route
   const code = r.name === 'lobby' || r.name === 'table' ? r.code : ''
@@ -15,8 +16,8 @@
   let selected = $state<string[]>(['cah-base-set'])
   let filter = $state('')
   let showAll = $state(false)
-  let ws: WebSocket | null = null
   let facePreview = $state(session?.faceDataUrl || '')
+  let transport: RoomTransport | null = null
 
   const isHost = $derived(!!room && !!session && room.hostId === session.id)
 
@@ -27,50 +28,32 @@
     }
     const index = await loadPackIndex()
     packs = index.all
-    connect()
-  })
-
-  onDestroy(() => {
-    ws?.close()
-  })
-
-  function connect() {
-    ws?.close()
-    ws = new WebSocket(wsUrl())
-    ws.onopen = () => {
-      const msg: ClientMsg = {
-        type: 'hello',
-        playerId: session!.id,
-        name: session!.name,
-        faceDataUrl: session!.faceDataUrl,
-        roomCode: code,
-        create: false,
-      }
-      ws!.send(JSON.stringify(msg))
-    }
-    ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data) as ServerMsg
-      if (msg.type === 'ip' && session) {
-        saveSession({ ...session, lastIpHint: msg.ip })
-      }
-      if (msg.type === 'error') error = msg.message
-      if (msg.type === 'state') {
-        room = msg.state
-        selected = msg.state.packIds
-        if (msg.state.phase !== 'lobby') {
-          navigate({ name: 'table', code: msg.state.code })
+    transport = connectRoom({
+      playerId: session.id,
+      name: session.name,
+      roomCode: code,
+      faceDataUrl: session.faceDataUrl,
+      onMessage: (msg: ServerMsg) => {
+        if (msg.type === 'ip' && session) {
+          saveSession({ ...session, lastIpHint: msg.ip })
         }
-      }
-    }
-    ws.onclose = () => {
-      setTimeout(() => {
-        if (document.visibilityState !== 'hidden') connect()
-      }, 1200)
-    }
-  }
+        if (msg.type === 'error') error = msg.message
+        if (msg.type === 'state') {
+          room = msg.state
+          selected = msg.state.packIds
+          if (msg.state.phase !== 'lobby') {
+            navigate({ name: 'table', code: msg.state.code })
+          }
+        }
+      },
+      onError: (m) => { error = m },
+    })
+  })
+
+  onDestroy(() => transport?.close())
 
   function send(msg: ClientMsg) {
-    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
+    transport?.send(msg)
   }
 
   function togglePack(id: string) {
@@ -92,7 +75,6 @@
     const reader = new FileReader()
     reader.onload = () => {
       const dataUrl = String(reader.result || '')
-      // Downscale for network
       const img = new Image()
       img.onload = () => {
         const canvas = document.createElement('canvas')
@@ -100,7 +82,6 @@
         canvas.width = size
         canvas.height = size
         const ctx = canvas.getContext('2d')!
-        // Cover crop
         const scale = Math.max(size / img.width, size / img.height)
         const w = img.width * scale
         const h = img.height * scale
@@ -131,7 +112,7 @@
         <h1 class="brand" style="font-size: clamp(2.2rem, 6vw, 3.4rem)">Room {code}</h1>
         <p class="lede" style="margin-bottom: 1.5rem">{room?.name || '…'} · share the code · no login</p>
       </div>
-      <button onclick={() => navigate({ name: 'home' })}>Leave</button>
+      <button type="button" onclick={() => navigate({ name: 'home' })}>Leave</button>
     </div>
 
     <div class="grid">
@@ -172,12 +153,13 @@
       <section class="panel stack">
         <div class="row" style="justify-content: space-between">
           <div class="muted">Packs · {selected.length} selected · 71 official + fan</div>
-          <button class="ghost" onclick={() => (showAll = !showAll)}>{showAll ? 'Official only' : 'Show all'}</button>
+          <button class="ghost" type="button" onclick={() => (showAll = !showAll)}>{showAll ? 'Official only' : 'Show all'}</button>
         </div>
         <input placeholder="Filter packs" bind:value={filter} disabled={!isHost} />
         <div class="packs">
           {#each visiblePacks as p}
             <button
+              type="button"
               class="pack"
               class:on={selected.includes(p.id)}
               disabled={!isHost}

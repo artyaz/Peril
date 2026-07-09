@@ -2,6 +2,8 @@ import * as THREE from 'three'
 
 export type AvatarHandle = {
   group: THREE.Group
+  handAnchor: THREE.Group
+  silhouette: THREE.Object3D
   setFace: (dataUrl?: string) => void
   setName: (name: string) => void
   setHighlight: (on: boolean) => void
@@ -14,109 +16,152 @@ function makeNameSprite(name: string) {
   c.height = 128
   const ctx = c.getContext('2d')!
   ctx.clearRect(0, 0, c.width, c.height)
-  ctx.fillStyle = 'rgba(42,42,40,0.55)'
-  ctx.font = '500 42px "DM Sans", system-ui, sans-serif'
+  ctx.fillStyle = 'rgba(42,42,40,0.5)'
+  ctx.font = '600 40px "DM Sans", system-ui, sans-serif'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   ctx.fillText(name, c.width / 2, c.height / 2)
   const tex = new THREE.CanvasTexture(c)
   tex.colorSpace = THREE.SRGBColorSpace
-  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false })
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    depthTest: true,
+    depthWrite: false,
+  })
   const sprite = new THREE.Sprite(mat)
-  sprite.scale.set(1.1, 0.28, 1)
-  sprite.position.y = 1.55
+  sprite.scale.set(0.5, 0.13, 1)
+  sprite.position.y = 0.95
   return sprite
 }
 
+/** Compact XP pear silhouette as a real lathed mesh (depth-tested, not a billboard). */
+function xpBodyGeometry() {
+  const pts = [
+    new THREE.Vector2(0.0, 0.0),
+    new THREE.Vector2(0.04, 0.01),
+    new THREE.Vector2(0.12, 0.04),
+    new THREE.Vector2(0.2, 0.1),
+    new THREE.Vector2(0.26, 0.18),
+    new THREE.Vector2(0.28, 0.28),
+    new THREE.Vector2(0.25, 0.36),
+    new THREE.Vector2(0.18, 0.42),
+    new THREE.Vector2(0.1, 0.46),
+    new THREE.Vector2(0.07, 0.5), // neck
+    new THREE.Vector2(0.09, 0.55),
+    new THREE.Vector2(0.14, 0.62),
+    new THREE.Vector2(0.155, 0.7),
+    new THREE.Vector2(0.14, 0.78),
+    new THREE.Vector2(0.08, 0.84),
+    new THREE.Vector2(0.0, 0.86),
+  ]
+  const geo = new THREE.LatheGeometry(pts, 40)
+  const pos = geo.attributes.position
+  const colors = new Float32Array(pos.count * 3)
+  const alpha = new Float32Array(pos.count)
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i)
+    const fade = THREE.MathUtils.smoothstep(y, 0.01, 0.22)
+    const shade = 0.7 + fade * 0.22
+    colors[i * 3] = shade
+    colors[i * 3 + 1] = shade
+    colors[i * 3 + 2] = shade * 0.98
+    alpha[i] = fade * fade
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+  geo.setAttribute('alpha', new THREE.BufferAttribute(alpha, 1))
+  return geo
+}
+
 /**
- * Windows XP–inspired light-gray figure that fades out toward the feet.
- * Optional face photo is stretched only across the front hemisphere.
+ * Small real-3D Windows XP user figure: lathed pear body + round head.
+ * Uses depth testing so it never overlays the local hand like a sprite.
  */
 export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
   const group = new THREE.Group()
+  const gray = '#b8b8b4'
 
   const bodyMat = new THREE.MeshStandardMaterial({
-    color: '#c8c8c4',
-    roughness: 0.85,
-    metalness: 0.0,
+    color: gray,
+    vertexColors: true,
+    roughness: 0.9,
+    metalness: 0,
     transparent: true,
     opacity: 1,
+    depthWrite: false,
   })
-
-  // Soft gradient fade via vertex colors on body
-  const bodyGeo = new THREE.CapsuleGeometry(0.28, 0.55, 6, 12)
-  const colors = new Float32Array(bodyGeo.attributes.position.count * 3)
-  for (let i = 0; i < bodyGeo.attributes.position.count; i++) {
-    const y = bodyGeo.attributes.position.getY(i)
-    const fade = THREE.MathUtils.clamp((y + 0.55) / 1.1, 0, 1)
-    const g = 0.55 + fade * 0.35
-    colors[i * 3] = g
-    colors[i * 3 + 1] = g
-    colors[i * 3 + 2] = g * 0.98
+  bodyMat.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>\nattribute float alpha;\nvarying float vAlpha;`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>\nvAlpha = alpha;`)
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>\nvarying float vAlpha;`)
+      .replace(
+        '#include <dithering_fragment>',
+        `gl_FragColor.a *= clamp(vAlpha, 0.0, 1.0);\n#include <dithering_fragment>`,
+      )
   }
-  bodyGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
-  const body = new THREE.Mesh(
-    bodyGeo,
-    new THREE.MeshStandardMaterial({
-      vertexColors: true,
-      roughness: 0.9,
-      metalness: 0,
-      transparent: true,
-      opacity: 0.92,
-      depthWrite: true,
-    }),
-  )
-  body.position.y = 0.55
+
+  const body = new THREE.Mesh(xpBodyGeometry(), bodyMat)
+  body.scale.set(0.82, 0.82, 0.58)
   body.castShadow = true
   group.add(body)
 
-  // Soft dissolve toward feet using a second translucent skirt
-  const fade = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.32, 0.38, 0.55, 20, 1, true),
-    new THREE.MeshStandardMaterial({
-      color: '#d2d2ce',
-      transparent: true,
-      opacity: 0.18,
-      roughness: 1,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    }),
-  )
-  fade.position.y = 0.22
-  group.add(fade)
-
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.26, 32, 24),
-    bodyMat.clone(),
-  )
-  head.position.y = 1.18
+  const headMat = new THREE.MeshStandardMaterial({
+    color: '#aeaea9',
+    roughness: 0.82,
+    metalness: 0,
+  })
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.145, 28, 22), headMat)
+  head.position.y = 0.66
+  head.scale.set(1, 1.02, 0.88)
   head.castShadow = true
   group.add(head)
 
-  // Front-only face stretch: hemisphere mapped with equirect-ish UV projection
-  const faceGeo = new THREE.SphereGeometry(0.262, 32, 24, 0, Math.PI, 0, Math.PI)
+  // Front-only face photo on a shallow sphere patch
+  const faceGeo = new THREE.SphereGeometry(
+    0.148,
+    24,
+    18,
+    Math.PI * 0.22,
+    Math.PI * 0.56,
+    0.4,
+    Math.PI * 0.5,
+  )
   const faceMat = new THREE.MeshStandardMaterial({
     color: '#d8d8d4',
-    roughness: 0.7,
+    roughness: 0.65,
     metalness: 0,
     transparent: true,
     opacity: 0,
   })
   const face = new THREE.Mesh(faceGeo, faceMat)
   face.position.copy(head.position)
-  face.rotation.y = Math.PI // face outward toward table center when avatar looks in
+  face.scale.copy(head.scale)
   group.add(face)
 
   let nameSprite = makeNameSprite(name)
   group.add(nameSprite)
 
   const ring = new THREE.Mesh(
-    new THREE.RingGeometry(0.34, 0.4, 32),
-    new THREE.MeshBasicMaterial({ color: '#9a9a94', transparent: true, opacity: 0, side: THREE.DoubleSide }),
+    new THREE.RingGeometry(0.18, 0.22, 28),
+    new THREE.MeshBasicMaterial({
+      color: '#9a9a94',
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      depthTest: true,
+    }),
   )
   ring.rotation.x = -Math.PI / 2
-  ring.position.y = 0.02
+  ring.position.y = 0.01
   group.add(ring)
+
+  const handAnchor = new THREE.Group()
+  // Hold cards just above the table rim
+  handAnchor.position.set(0, 0.42, 0.2)
+  handAnchor.rotation.x = -0.45
+  group.add(handAnchor)
 
   let faceTex: THREE.Texture | null = null
 
@@ -131,10 +176,8 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
       faceMat.needsUpdate = true
       return
     }
-    const loader = new THREE.TextureLoader()
-    loader.load(dataUrl, (tex) => {
+    new THREE.TextureLoader().load(dataUrl, (tex) => {
       tex.colorSpace = THREE.SRGBColorSpace
-      // Stretch across front: use ClampToEdge and slight offset
       tex.wrapS = THREE.ClampToEdgeWrapping
       tex.wrapT = THREE.ClampToEdgeWrapping
       faceTex = tex
@@ -154,10 +197,11 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
   }
 
   function setHighlight(on: boolean) {
-    ;(ring.material as THREE.MeshBasicMaterial).opacity = on ? 0.55 : 0
+    ;(ring.material as THREE.MeshBasicMaterial).opacity = on ? 0.5 : 0
   }
 
   function dispose() {
+    faceTex?.dispose()
     group.traverse((obj) => {
       if ((obj as THREE.Mesh).isMesh) {
         const m = obj as THREE.Mesh
@@ -166,11 +210,15 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
         if (Array.isArray(mat)) mat.forEach((x) => x.dispose())
         else mat.dispose()
       }
+      if ((obj as THREE.Sprite).isSprite) {
+        const s = obj as THREE.Sprite
+        s.material.map?.dispose()
+        s.material.dispose()
+      }
     })
-    faceTex?.dispose()
   }
 
   if (faceDataUrl) setFace(faceDataUrl)
 
-  return { group, setFace, setName, setHighlight, dispose }
+  return { group, handAnchor, silhouette: body, setFace, setName, setHighlight, dispose }
 }
