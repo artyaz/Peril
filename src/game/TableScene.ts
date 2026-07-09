@@ -12,6 +12,7 @@ import {
 import { createAvatar, type AvatarHandle } from './avatar'
 import { Spring, TweenManager, easeOutBack, easeOutCubic } from '../lib/motion'
 import type { RoomState, CardDrag } from '../lib/protocol'
+import { agentDebugLog } from '../lib/agentDebug'
 
 export type TableSceneApi = {
   mount: (el: HTMLElement) => void
@@ -1087,6 +1088,23 @@ export function createTableScene(): TableSceneApi {
     const rotY = localDrag.rotY
     const pick = room?.blackCard?.pick || 1
     const stageIndex = stagedPlays.length
+    // #region agent log
+    agentDebugLog({
+      hypothesisId: 'A,B',
+      location: 'src/game/TableScene.ts:endHandDragPlay:entry',
+      message: 'hand drop reconciliation started',
+      data: {
+        pick,
+        stageIndex,
+        cardText: text.slice(0, 80),
+        roomUpdatedAt: room?.updatedAt || 0,
+        roomHasOwnSubmission: !!room?.submissions?.some((s) => s.playerId === localId),
+        handMeshes: handCards.length,
+        tableMeshes: tableCards.length,
+        staged: stagedPlays.length,
+      },
+    })
+    // #endregion
 
     handGroup?.remove(card)
     if (card.parent !== tableGroup) tableGroup.add(card)
@@ -1114,12 +1132,30 @@ export function createTableScene(): TableSceneApi {
     dragCb(null)
 
     // Only submit when we've staged the full pick count — avoids "Play exactly N" errors
-    if (stagedPlays.length >= pick) {
+    const submitted = stagedPlays.length >= pick
+    if (submitted) {
       const cards = stagedPlays.map((s) => s.text)
       const positions = stagedPlays.map((s) => ({ x: s.x, z: s.z, rotY: s.rotY }))
       stagedPlays = []
       playCb(cards, positions)
     }
+    // #region agent log
+    agentDebugLog({
+      hypothesisId: 'A,B',
+      location: 'src/game/TableScene.ts:endHandDragPlay:exit',
+      message: 'hand drop callbacks completed',
+      data: {
+        pick,
+        submitted,
+        handMeshes: handCards.length,
+        tableMeshes: tableCards.length,
+        staged: stagedPlays.length,
+        optimisticLocalTableCards: tableCards.filter((tableCard) =>
+          tableCard.userData.cardKey?.startsWith(`local:${localId}:`),
+        ).length,
+      },
+    })
+    // #endregion
   }
 
   function endTableDrag() {
@@ -1348,6 +1384,29 @@ export function createTableScene(): TableSceneApi {
   }
 
   function setState(state: RoomState, localPlayerId: string) {
+    // #region agent log
+    agentDebugLog({
+      hypothesisId: 'A,B,C',
+      location: 'src/game/TableScene.ts:setState:entry',
+      message: 'server state reconciliation started',
+      data: {
+        incomingUpdatedAt: state.updatedAt || 0,
+        previousUpdatedAt: room?.updatedAt || 0,
+        incomingPhase: state.phase,
+        previousPhase: room?.phase || null,
+        incomingRound: state.round,
+        incomingHandCount: state.you?.hand.length ?? null,
+        incomingSubmissions: state.submissions.length,
+        incomingOwnSubmission: state.submissions.some((s) => s.playerId === localPlayerId),
+        handMeshes: handCards.length,
+        tableMeshes: tableCards.length,
+        staged: stagedPlays.length,
+        optimisticLocalTableCards: tableCards.filter((card) =>
+          card.userData.cardKey?.startsWith(`local:${localPlayerId}:`),
+        ).length,
+      },
+    })
+    // #endregion
     room = state
     localId = localPlayerId
     if (state.hover) {
@@ -1403,6 +1462,24 @@ export function createTableScene(): TableSceneApi {
     } else if (!localDrag) {
       applyGhost(state.drag?.playerId === localPlayerId ? null : state.drag ?? null)
     }
+    // #region agent log
+    agentDebugLog({
+      hypothesisId: 'A,B,C',
+      location: 'src/game/TableScene.ts:setState:exit',
+      message: 'server state reconciliation completed',
+      data: {
+        incomingUpdatedAt: state.updatedAt || 0,
+        rawHandCount: rawHand.length,
+        filteredHandCount: filteredHand.length,
+        handMeshes: handCards.length,
+        tableMeshes: tableCards.length,
+        staged: stagedPlays.length,
+        optimisticLocalTableCards: tableCards.filter((card) =>
+          card.userData.cardKey?.startsWith(`local:${localPlayerId}:`),
+        ).length,
+      },
+    })
+    // #endregion
   }
 
   function setPeerHover(playerId: string, cardIndex: number | null, cardText?: string | null) {

@@ -6,6 +6,17 @@ import { Redis } from '@upstash/redis'
 const HAND_SIZE = 7
 const ROOM_TTL_SEC = 60 * 60 * 6
 
+function appendAgentLog(event) {
+  // #region agent log
+  try {
+    fs.appendFileSync(
+      '/opt/cursor/logs/debug.log',
+      `${JSON.stringify({ ...event, timestamp: event.timestamp ?? Date.now() })}\n`,
+    )
+  } catch { /* debug logging must not affect gameplay */ }
+  // #endregion
+}
+
 function randCode() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
   let out = ''
@@ -355,6 +366,27 @@ function playCards(room, playerId, cards, positions) {
     for (const s of room.submissions) s.revealed = true
     room.phase = 'voting'
   }
+  // #region agent log
+  appendAgentLog({
+    hypothesisId: 'D,E',
+    location: 'api/_lib/engine.js:playCards',
+    message: 'submission quorum evaluated',
+    data: {
+      pick,
+      submissions: room.submissions.length,
+      needed,
+      phaseAfter: room.phase,
+      participants: playerList(room).map((p) => ({
+        seat: p.seat,
+        bot: !!p.isBot,
+        connected: p.connected !== false,
+        czar: p.id === room.czarId,
+        submitted: room.submissions.some((s) => s.playerId === p.id),
+      })),
+    },
+    timestamp: Date.now(),
+  })
+  // #endregion
   return touch(room)
 }
 
@@ -409,6 +441,22 @@ function nextRound(room) {
 }
 
 function runBots(room) {
+  const snapshot = () => {
+    const pick = room.blackCard?.pick || 1
+    return {
+      phase: room.phase,
+      submissions: room.submissions.length,
+      votes: Object.keys(room.votes || {}).length,
+      playableBots: Object.values(room.players).filter(
+        (p) =>
+          p.isBot &&
+          p.id !== room.czarId &&
+          !room.submissions.some((s) => s.playerId === p.id) &&
+          (p.hand || []).length >= pick,
+      ).length,
+    }
+  }
+  const before = snapshot()
   if (room.phase === 'playing') {
     const pick = room.blackCard?.pick || 1
     // Stagger: only play one bot per runBots call so fly-in animations are visible
@@ -438,6 +486,15 @@ function runBots(room) {
       } catch { /* ignore */ }
     }
   }
+  // #region agent log
+  appendAgentLog({
+    hypothesisId: 'D',
+    location: 'api/_lib/engine.js:runBots',
+    message: 'bot pass completed',
+    data: { before, after: snapshot() },
+    timestamp: Date.now(),
+  })
+  // #endregion
   return room
 }
 
@@ -580,5 +637,6 @@ export {
   joinRoom,
   applyAction,
   runBots,
+  appendAgentLog,
   HAND_SIZE,
 }

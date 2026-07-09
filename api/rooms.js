@@ -7,6 +7,7 @@ import {
   publicMeta,
   applyAction,
   storeMode,
+  appendAgentLog,
 } from './_lib/engine.js'
 
 function cors(res) {
@@ -57,6 +58,20 @@ export default async function handler(req, res) {
     const body = await readBody(req)
     const action = String(body.action || '')
     const ip = clientIp(req)
+
+    if (action === 'debug_log') {
+      const event = body.event && typeof body.event === 'object' ? body.event : {}
+      // #region agent log
+      appendAgentLog({
+        hypothesisId: String(event.hypothesisId || 'unknown').slice(0, 32),
+        location: String(event.location || 'browser').slice(0, 160),
+        message: String(event.message || 'client event').slice(0, 160),
+        data: event.data && typeof event.data === 'object' ? event.data : {},
+        timestamp: Number(event.timestamp) || Date.now(),
+      })
+      // #endregion
+      return send(res, 200, { logged: true })
+    }
 
     if (action === 'create') {
       const room = await createRoom({
