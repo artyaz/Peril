@@ -1,10 +1,10 @@
 import * as THREE from 'three'
 import { Spring } from '../lib/motion'
 
-/** Small, thin cards — slight overlap in hand; peek lifts on hover. */
-export const CARD_W = 0.12
-export const CARD_H = 0.168
-export const CARD_D = 0.0018
+/** Compact thin cards — slight overlap in hand; peek lifts on hover. */
+export const CARD_W = 0.092
+export const CARD_H = 0.128
+export const CARD_D = 0.0016
 /** Table surface is a 0.05-tall cylinder centered at y=0 → top at 0.025. */
 export const TABLE_SURFACE_TOP = 0.025
 /** Card center Y so the underside rests flush on the surface (not sunk, not floating). */

@@ -26,7 +26,7 @@ function makeNameSprite(name: string) {
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false })
   const sprite = new THREE.Sprite(mat)
   sprite.scale.set(0.85, 0.21, 1)
-  sprite.position.y = 2.15
+  sprite.position.y = 1.55
   sprite.renderOrder = 3
   return sprite
 }
@@ -115,8 +115,9 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
     sizeAttenuation: true,
   })
   const sil = new THREE.Sprite(silMat)
-  sil.scale.set(1.85, 2.3, 1)
-  sil.position.y = 1.35
+  // Modest XP glyph — chest meets table rim when group.y ≈ TABLE_Y − 0.9
+  sil.scale.set(1.15, 1.45, 1)
+  sil.position.y = 0.82
   sil.renderOrder = 2
   group.add(sil)
 
@@ -138,7 +139,7 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
 
   // Cards held at chest toward table (group yaw faces center)
   const handAnchor = new THREE.Group()
-  handAnchor.position.set(0, 1.15, 0.5)
+  handAnchor.position.set(0, 0.72, 0.38)
   handAnchor.rotation.x = -0.55
   group.add(handAnchor)
 

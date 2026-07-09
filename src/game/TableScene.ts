@@ -71,9 +71,9 @@ export function createTableScene(): TableSceneApi {
   let selected = new Set<string>()
   let peerHover = new Map<string, number | null>()
   let lookClose = false
-  const camBlend = new Spring(0, 160, 24)
-  const camPanX = new Spring(0, 140, 20)
-  const camPanZ = new Spring(0, 140, 20)
+  const camBlend = new Spring(0, 220, 28)
+  const camPanX = new Spring(0, 160, 22)
+  const camPanZ = new Spring(0, 160, 22)
   let pointerNdc = { x: 0, y: 0 }
   let pointerScreenY = 0.72
   let playCb: (cards: string[], positions: { x: number; z: number; rotY?: number }[]) => void =
@@ -103,11 +103,11 @@ export function createTableScene(): TableSceneApi {
   /** Staged local drops before submitting (for pick > 1) */
   let stagedPlays: { text: string; x: number; z: number; rotY: number; card: CardMesh }[] = []
 
-  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.34, 1.28)
-  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.04, 0.55)
-  // Pull back + look down so far-rim peers and table cards stay in frame
-  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 1.05, 1.55)
-  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + 0.05, -0.75)
+  // Hand: look across cards. Table: rise over the surface and tip clearly downward.
+  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.3, 1.38)
+  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.04, 0.62)
+  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 1.85, 0.72)
+  const tableCamTarget = new THREE.Vector3(0, TABLE_Y - 0.08, -0.15)
 
   function ensureHitbox(card: CardMesh) {
     if (card.getObjectByName('hitbox')) return
@@ -248,7 +248,7 @@ export function createTableScene(): TableSceneApi {
     scene.add(fill)
 
     handGroup = new THREE.Group()
-    handGroup.position.set(0, TABLE_Y + 0.1, 1.08)
+    handGroup.position.set(0, TABLE_Y + 0.08, 1.02)
     scene.add(handGroup)
 
     const canvas = threeRenderer.domElement
@@ -442,22 +442,23 @@ export function createTableScene(): TableSceneApi {
     }
 
     const n = handCards.length
-    const spread = Math.min(0.095, 0.72 / Math.max(n, 1))
+    // Slightly spaced fan — readable hitboxes without huge gaps
+    const spread = Math.min(0.078, 0.58 / Math.max(n, 1))
     const start = -((n - 1) * spread) / 2
     handCards.forEach((card, i) => {
       if (card.userData.dragging) return
       const mid = (n - 1) / 2
       card.position.x = start + i * spread
-      card.position.z = 0.004 * Math.abs(i - mid)
+      card.position.z = 0.005 * Math.abs(i - mid)
       card.userData.baseY = 0
-      card.userData.baseRotX = -0.2
-      card.userData.baseRotY = (i - mid) * -0.02
-      card.userData.baseRotZ = (i - mid) * -0.008
+      card.userData.baseRotX = -0.18
+      card.userData.baseRotY = (i - mid) * -0.022
+      card.userData.baseRotZ = (i - mid) * -0.01
       card.rotation.x = card.userData.baseRotX
       card.rotation.y = card.userData.baseRotY
       card.rotation.z = card.userData.baseRotZ
     })
-    handGroup.position.set(0, TABLE_Y + 0.1, 1.08)
+    handGroup.position.set(0, TABLE_Y + 0.08, 1.02)
   }
 
   function layoutPeerHand(
@@ -480,7 +481,7 @@ export function createTableScene(): TableSceneApi {
     }
     while (cards.length < handCount) {
       const card = createCard('Peril', 'back')
-      card.scale.setScalar(0.88)
+      card.scale.setScalar(0.72)
       const i = cards.length
       card.userData.index = i
       handle.handAnchor.add(card)
@@ -525,9 +526,9 @@ export function createTableScene(): TableSceneApi {
     const peerLayouts: SeatLayout[] = peers.map((_, i) => {
       const n = peers.length
       const t = n === 1 ? 0.5 : i / (n - 1)
-      // Far arc, seated ON the table rim so they stay in the tilted overview
+      // Far arc just outside the table rim
       const angle = -0.85 + t * 1.7
-      const dist = TABLE_RADIUS * 0.92
+      const dist = TABLE_RADIUS + 0.22
       return {
         position: new THREE.Vector3(Math.sin(angle) * dist, 0, -Math.cos(angle) * dist),
         yaw: Math.atan2(-Math.sin(angle), Math.cos(angle)),
@@ -548,7 +549,8 @@ export function createTableScene(): TableSceneApi {
       }
     }
 
-    const sitY = TABLE_Y + 0.05
+    // Avatar origin low so the XP chest sits at the table rim (not in the sky)
+    const sitY = TABLE_Y - 0.88
     peers.forEach((p, i) => {
       const seat = peerLayouts[i]
       if (!seat) return
@@ -558,14 +560,14 @@ export function createTableScene(): TableSceneApi {
         handle = createAvatar(p.name, p.faceDataUrl)
         avatars.set(p.id, handle)
         worldGroup!.add(handle.group)
-        handle.group.position.set(seat.position.x, sitY - 0.25, seat.position.z)
+        handle.group.position.set(seat.position.x, sitY - 0.2, seat.position.z)
         handle.group.rotation.y = seat.yaw
         const target = handle
-        const fromY = sitY - 0.25
+        const fromY = sitY - 0.2
         tweens.tween(
           0.75,
           (v) => {
-            target.group.position.y = fromY + v * 0.25
+            target.group.position.y = fromY + v * 0.2
           },
           easeOutBack,
         )
@@ -1220,11 +1222,13 @@ export function createTableScene(): TableSceneApi {
     if (!camera || !threeRenderer || !root) return
     updatePointerFromEvent(ev)
 
-    const tableAmount = THREE.MathUtils.clamp((HAND_ZONE_Y - pointerScreenY) / 0.42, 0, 1)
-    camBlend.center = lookClose ? Math.max(tableAmount, 0.9) : tableAmount
-    if (tableAmount > 0.05 || lookClose) {
-      camPanX.center = THREE.MathUtils.clamp(pointerNdc.x, -1, 1) * 0.85
-      camPanZ.center = THREE.MathUtils.clamp(0.45 - pointerScreenY, -0.45, 0.45) * 0.55
+    // Map upper half → full table overview with a snappy ease-in
+    const raw = THREE.MathUtils.clamp((HAND_ZONE_Y - pointerScreenY) / 0.4, 0, 1)
+    const tableAmount = raw * raw // ease toward table so tilt reads clearly
+    camBlend.center = lookClose ? Math.max(tableAmount, 0.95) : tableAmount
+    if (tableAmount > 0.04 || lookClose) {
+      camPanX.center = THREE.MathUtils.clamp(pointerNdc.x, -1, 1) * 0.7
+      camPanZ.center = THREE.MathUtils.clamp(0.4 - pointerScreenY, -0.4, 0.4) * 0.4
     } else {
       camPanX.center = 0
       camPanZ.center = 0
@@ -1411,15 +1415,16 @@ export function createTableScene(): TableSceneApi {
       baseTarget.z += camPanZ.value * 0.25
       camera.position.copy(basePos)
       camera.lookAt(baseTarget)
-      camera.fov = THREE.MathUtils.lerp(44, 38, t)
+      // Narrower FOV when looking down at the table
+      camera.fov = THREE.MathUtils.lerp(46, 34, t)
       camera.updateProjectionMatrix()
     }
 
     if (handGroup) {
       const handOpacity = 1 - camBlend.value
       handGroup.visible = handOpacity > 0.08
-      handGroup.position.y = TABLE_Y + 0.1 - camBlend.value * 0.35
-      handGroup.position.z = 1.08 + camBlend.value * 0.35
+      handGroup.position.y = TABLE_Y + 0.08 - camBlend.value * 0.4
+      handGroup.position.z = 1.02 + camBlend.value * 0.4
     }
 
     const inHandZone = !lookClose && zoneFromPointer(pointerScreenY) === 'hand'
@@ -1444,7 +1449,7 @@ export function createTableScene(): TableSceneApi {
     }
 
     const t = clock.elapsedTime
-    const sitY = TABLE_Y + 0.05
+    const sitY = TABLE_Y - 0.88
     for (const [id, a] of avatars) {
       a.group.position.y = sitY + Math.sin(t * 1.1 + a.group.position.x * 2) * 0.008
       const hoverIdx = peerHover.get(id) ?? null
