@@ -487,7 +487,7 @@ export function createTableScene(): TableSceneApi {
       }
     }
 
-    const sitY = TABLE_Y - 0.55
+    const sitY = TABLE_Y - 0.42
     peers.forEach((p, i) => {
       const seat = peerLayouts[i]
       if (!seat) return
@@ -1232,7 +1232,7 @@ export function createTableScene(): TableSceneApi {
     }
 
     const t = clock.elapsedTime
-    const sitY = TABLE_Y - 0.55
+    const sitY = TABLE_Y - 0.42
     for (const [id, a] of avatars) {
       a.group.position.y = sitY + Math.sin(t * 1.1 + a.group.position.x * 2) * 0.008
       const hoverIdx = peerHover.get(id) ?? null
