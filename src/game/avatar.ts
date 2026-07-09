@@ -40,8 +40,8 @@ function makeNameSprite(name: string) {
     sizeAttenuation: true,
   })
   const sprite = new THREE.Sprite(mat)
-  sprite.scale.set(0.72, 0.18, 1)
-  sprite.position.y = 1.02
+  sprite.scale.set(0.78, 0.2, 1)
+  sprite.position.y = 0.98
   sprite.center.set(0.5, 0.5)
   sprite.renderOrder = 20
   return sprite
@@ -127,7 +127,7 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
   }
 
   const body = new THREE.Mesh(xpBodyGeometry(), bodyMat)
-  body.scale.set(1.05, 1.05, 0.72)
+  body.scale.set(0.92, 0.92, 0.64)
   body.castShadow = true
   group.add(body)
 
@@ -136,15 +136,15 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
     roughness: 0.75,
     metalness: 0,
   })
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.19, 32, 24), headMat)
-  head.position.y = 0.72
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.17, 32, 24), headMat)
+  head.position.y = 0.64
   head.scale.set(1, 1.06, 0.92)
   head.castShadow = true
   group.add(head)
 
   // Front-only face photo on a shallow sphere patch
   const faceGeo = new THREE.SphereGeometry(
-    0.193,
+    0.173,
     24,
     18,
     Math.PI * 0.22,
@@ -165,7 +165,7 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
   group.add(face)
 
   let nameSprite = makeNameSprite(name)
-  nameSprite.position.y = 1.05
+  nameSprite.position.y = 0.88
   group.add(nameSprite)
 
   const ring = new THREE.Mesh(

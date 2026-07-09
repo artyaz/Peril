@@ -48,20 +48,20 @@ type LocalDrag = {
 }
 
 const TABLE_Y = 1.55
-const TABLE_RADIUS = 0.5
-const HAND_ZONE_Y = 0.55
+const TABLE_RADIUS = 0.52
+const HAND_ZONE_Y = 0.58
 const DRAG_BROADCAST_MS = 40
 const CLICK_MOVE_PX = 6
-/** Feet Y — heads clear the rim and sit in the upper third of the frame. */
-const AVATAR_SIT_Y = TABLE_Y - 0.22
-/** Spring feel for pointer-follow while dragging. */
+/** Feet Y — keep heads + name pills inside the upper frame. */
+const AVATAR_SIT_Y = TABLE_Y - 0.48
 const DRAG_STIFF = 420
 const DRAG_DAMP = 34
-const HAND_GROUP_Y = TABLE_Y + 0.1
-const HAND_GROUP_Z = 0.7
-/** Wider FOV so the full hand + far seats fit. */
-const FOV_HAND = 62
-const FOV_TABLE = 48
+/** Local hand lives in camera space so framing never clips. */
+const HAND_CAM_X = 0
+const HAND_CAM_Y = -0.14
+const HAND_CAM_Z = -0.48
+const FOV_HAND = 60
+const FOV_TABLE = 52
 
 export function createTableScene(): TableSceneApi {
   let threeRenderer: THREE.WebGLRenderer | null = null
@@ -103,11 +103,13 @@ export function createTableScene(): TableSceneApi {
     new THREE.Vector3(0, 1, 0),
     -(TABLE_Y + TABLE_CARD_Y + 0.01),
   )
-  const handPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -HAND_GROUP_Y)
+  const handPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0)
   const hitPoint = new THREE.Vector3()
   let tableGroup: THREE.Group | null = null
   let handGroup: THREE.Group | null = null
   let worldGroup: THREE.Group | null = null
+  const _handPlanePoint = new THREE.Vector3()
+  const _handPlaneNormal = new THREE.Vector3()
 
   let localDrag: LocalDrag | null = null
   let lastDragBroadcast = 0
@@ -117,11 +119,11 @@ export function createTableScene(): TableSceneApi {
   /** Staged local drops before submitting (for pick > 1) */
   let stagedPlays: { text: string; x: number; z: number; rotY: number; card: CardMesh }[] = []
 
-  // Hand: back far enough that card bottoms stay on-screen; table: roomy overhead.
-  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.55, 1.15)
-  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.12, 0.35)
-  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 1.05, 0.85)
-  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + TABLE_CARD_Y, -0.04)
+  // Table overview: high enough to see heads/names; hand is camera-locked separately.
+  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.55, 1.2)
+  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.02, 0.15)
+  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 1.25, 1.05)
+  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + 0.02, -0.08)
 
   function ensureHitbox(card: CardMesh) {
     if (card.getObjectByName('hitbox')) return
@@ -164,6 +166,7 @@ export function createTableScene(): TableSceneApi {
     camera = new THREE.PerspectiveCamera(FOV_HAND, 1, 0.05, 60)
     camera.position.copy(handCamPos)
     camera.lookAt(handCamTarget)
+    scene.add(camera)
 
     threeRenderer = new THREE.WebGLRenderer({
       antialias: true,
@@ -262,8 +265,10 @@ export function createTableScene(): TableSceneApi {
     scene.add(fill)
 
     handGroup = new THREE.Group()
-    handGroup.position.set(0, HAND_GROUP_Y, HAND_GROUP_Z)
-    scene.add(handGroup)
+    // Parent to camera so the fan always sits in the lower viewport
+    camera.add(handGroup)
+    handGroup.position.set(HAND_CAM_X, HAND_CAM_Y, HAND_CAM_Z)
+    handGroup.rotation.x = 0.18
 
     const canvas = threeRenderer.domElement
     canvas.style.display = 'block'
@@ -463,16 +468,17 @@ export function createTableScene(): TableSceneApi {
       if (card.userData.dragging) return
       const mid = (n - 1) / 2
       card.position.x = start + i * spread
-      card.position.z = 0.01 * Math.abs(i - mid)
-      card.userData.baseY = 0.02
-      card.userData.baseRotX = -0.35
-      card.userData.baseRotY = (i - mid) * -0.028
-      card.userData.baseRotZ = (i - mid) * -0.012
+      card.position.z = 0.008 * Math.abs(i - mid)
+      card.userData.baseY = 0
+      // Camera-space fan: slight lean toward the player
+      card.userData.baseRotX = -0.08
+      card.userData.baseRotY = (i - mid) * -0.03
+      card.userData.baseRotZ = (i - mid) * -0.014
       card.rotation.x = card.userData.baseRotX
       card.rotation.y = card.userData.baseRotY
       card.rotation.z = card.userData.baseRotZ
     })
-    handGroup.position.set(0, HAND_GROUP_Y, HAND_GROUP_Z)
+    handGroup.position.set(HAND_CAM_X, HAND_CAM_Y, HAND_CAM_Z)
   }
 
   function layoutPeerHand(
@@ -481,7 +487,6 @@ export function createTableScene(): TableSceneApi {
     handCount: number,
     hoverIdx: number | null,
     peekText: string | null,
-    faceLocalYaw = 0,
   ) {
     let cards = peerHands.get(playerId)
     if (!cards) {
@@ -496,31 +501,41 @@ export function createTableScene(): TableSceneApi {
     }
     while (cards.length < handCount) {
       const card = createCard('Peril', 'back')
-      card.scale.setScalar(0.72)
+      card.scale.setScalar(0.7)
       const i = cards.length
       card.userData.index = i
       handle.handAnchor.add(card)
       cards.push(card)
     }
 
-    // Face the local player so cards read upright (not edge-on from the side)
-    handle.handAnchor.position.set(0, 0.52, 0.18)
-    handle.handAnchor.rotation.set(-0.22, faceLocalYaw, 0)
+    // Billboard the fan toward the local camera so cards always read portrait
+    handle.handAnchor.position.set(0, 0.4, 0.24)
+    if (camera) {
+      const anchorWorld = new THREE.Vector3()
+      handle.group.localToWorld(anchorWorld.copy(handle.handAnchor.position))
+      const camPos = camera.position.clone()
+      // Face camera in XZ; keep upright
+      const dx = camPos.x - anchorWorld.x
+      const dz = camPos.z - anchorWorld.z
+      const worldYaw = Math.atan2(dx, dz)
+      handle.handAnchor.rotation.set(0.08, worldYaw - handle.group.rotation.y, 0)
+    } else {
+      handle.handAnchor.rotation.set(0.08, 0, 0)
+    }
 
     const n = cards.length
-    const spread = Math.min(0.085, 0.55 / Math.max(n, 1))
+    const spread = Math.min(0.075, 0.48 / Math.max(n, 1))
     const start = -((n - 1) * spread) / 2
     cards.forEach((card, i) => {
       const mid = (n - 1) / 2
       const isPeek = hoverIdx === i
       card.position.x = start + i * spread
-      card.position.y = isPeek ? 0.05 : 0
-      card.position.z = 0.008 * Math.abs(i - mid)
-      card.userData.baseY = isPeek ? 0.05 : 0
-      // Same upright fan language as the local hand
-      card.userData.baseRotX = isPeek ? -0.2 : -0.38
-      card.userData.baseRotY = (i - mid) * -0.028
-      card.userData.baseRotZ = (i - mid) * -0.01
+      card.position.y = isPeek ? 0.035 : 0
+      card.position.z = 0.005 * Math.abs(i - mid)
+      card.userData.baseY = isPeek ? 0.035 : 0
+      card.userData.baseRotX = isPeek ? -0.04 : -0.1
+      card.userData.baseRotY = (i - mid) * -0.026
+      card.userData.baseRotZ = (i - mid) * -0.012
       card.rotation.x = card.userData.baseRotX
       card.rotation.y = card.userData.baseRotY
       card.rotation.z = card.userData.baseRotZ
@@ -551,8 +566,8 @@ export function createTableScene(): TableSceneApi {
       const n = peers.length
       const t = n === 1 ? 0.5 : i / (n - 1)
       // Far-side arc — heads stay above the table in both camera modes
-      const angle = -1.05 + t * 2.1
-      const dist = TABLE_RADIUS + 0.28
+      const angle = -0.95 + t * 1.9
+      const dist = TABLE_RADIUS + 0.32
       return {
         position: new THREE.Vector3(Math.sin(angle) * dist, 0, -Math.cos(angle) * dist),
         yaw: Math.atan2(-Math.sin(angle), Math.cos(angle)),
@@ -608,8 +623,7 @@ export function createTableScene(): TableSceneApi {
       const hoverIdx = peerHover.get(p.id) ?? state.hover?.[p.id] ?? null
       const peekText = peerHoverText.get(p.id) ?? state.hoverText?.[p.id] ?? null
       const count = Math.max(1, Math.min(p.handCount ?? 7, 7))
-      // Cancel seat yaw so the fan faces the local camera (+Z), not the table center
-      layoutPeerHand(handle, p.id, count, hoverIdx, peekText, -seat.yaw)
+      layoutPeerHand(handle, p.id, count, hoverIdx, peekText)
     })
   }
 
@@ -1023,14 +1037,21 @@ export function createTableScene(): TableSceneApi {
     }
   }
 
+  function updateHandDragPlane() {
+    if (!handGroup || !camera) return
+    handGroup.getWorldPosition(_handPlanePoint)
+    // Plane facing the camera through the hand fan
+    camera.getWorldDirection(_handPlaneNormal)
+    handPlane.setFromNormalAndCoplanarPoint(_handPlaneNormal, _handPlanePoint)
+  }
+
   function updateLocalDragPosition() {
     if (!localDrag || !camera) return
     const zone = zoneFromPointer(pointerScreenY)
     const useHandPlane = localDrag.source === 'hand' && zone === 'hand'
+    if (useHandPlane) updateHandDragPlane()
+    else tablePlane.constant = -(TABLE_Y + TABLE_CARD_Y + 0.018)
     const plane = useHandPlane ? handPlane : tablePlane
-    plane.constant = useHandPlane
-      ? -HAND_GROUP_Y
-      : -(TABLE_Y + TABLE_CARD_Y + 0.018)
     const hit = projectOntoPlane(plane)
     if (!hit) return
 
@@ -1069,15 +1090,15 @@ export function createTableScene(): TableSceneApi {
           localDrag.followX.set(loc.x)
           localDrag.followY.set(loc.y)
           localDrag.followZ.set(loc.z)
-          localDrag.card.userData.baseRotX = -0.2
+          localDrag.card.userData.baseRotX = -0.08
           localDrag.card.rotation.order = 'YXZ'
         }
         if (handGroup) {
           const loc = handGroup.worldToLocal(hit)
           localDrag.followX.center = loc.x
+          localDrag.followY.center = loc.y
           localDrag.followZ.center = loc.z
-          localDrag.followY.center = 0.1
-          localDrag.card.rotation.x = -0.2
+          localDrag.card.rotation.x = -0.08
         }
       }
     } else if (tableGroup) {
@@ -1505,11 +1526,15 @@ export function createTableScene(): TableSceneApi {
     }
 
     if (handGroup) {
-      const handOpacity = 1 - camBlend.value
-      handGroup.visible = handOpacity > 0.08
-      // Ease the fan down/out when looking at the table so it doesn't clip the rim
-      handGroup.position.y = HAND_GROUP_Y - camBlend.value * 0.08
-      handGroup.position.z = HAND_GROUP_Z + camBlend.value * 0.1
+      const t = camBlend.value
+      handGroup.visible = t < 0.92
+      // Slide the camera-space fan down/out when looking at the table
+      handGroup.position.set(
+        HAND_CAM_X,
+        HAND_CAM_Y - t * 0.12,
+        HAND_CAM_Z - t * 0.08,
+      )
+      handGroup.rotation.x = 0.18 + t * 0.1
     }
 
     const inHandZone = !lookClose && zoneFromPointer(pointerScreenY) === 'hand'
@@ -1551,8 +1576,7 @@ export function createTableScene(): TableSceneApi {
         Math.min(room?.players.find((p) => p.id === id)?.handCount || 7, 7),
         1,
       )
-      // Keep fan facing the local camera regardless of seat yaw
-      layoutPeerHand(a, id, count, hoverIdx, peekText, -a.group.rotation.y)
+      layoutPeerHand(a, id, count, hoverIdx, peekText)
     }
 
     for (const [id, cards] of peerHands) {

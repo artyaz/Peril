@@ -278,7 +278,7 @@
   .hint-stack {
     position: absolute;
     z-index: 2;
-    bottom: 1.15rem;
+    bottom: 0.85rem;
     left: 50%;
     transform: translateX(-50%);
     text-align: center;
@@ -288,11 +288,12 @@
     width: min(28rem, calc(100% - 2rem));
   }
   .hint-stack.vote-panel {
+    bottom: 1rem;
     padding: 0.85rem 1.1rem;
     border-radius: 16px;
-    background: rgba(250, 250, 248, 0.82);
+    background: rgba(250, 250, 248, 0.9);
     backdrop-filter: blur(10px);
-    box-shadow: 0 12px 32px rgba(40, 40, 36, 0.1);
+    box-shadow: 0 12px 32px rgba(40, 40, 36, 0.12);
   }
   .hint {
     color: var(--ink);
