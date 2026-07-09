@@ -56,11 +56,11 @@ const CLICK_MOVE_PX = 6
 const AVATAR_SIT_Y = TABLE_Y - 0.55
 const DRAG_STIFF = 420
 const DRAG_DAMP = 34
-/** Local hand lives in camera space so framing never clips. */
+/** Local hand in camera space: negative Y = lower viewport; farther Z = smaller on screen. */
 const HAND_CAM_X = 0
-const HAND_CAM_Y = 0.02
-const HAND_CAM_Z = -0.38
-const FOV_HAND = 68
+const HAND_CAM_Y = -0.22
+const HAND_CAM_Z = -0.55
+const FOV_HAND = 70
 const FOV_TABLE = 58
 
 export function createTableScene(): TableSceneApi {
@@ -120,10 +120,10 @@ export function createTableScene(): TableSceneApi {
   let stagedPlays: { text: string; x: number; z: number; rotY: number; card: CardMesh }[] = []
 
   // Pulled back so heads/names clear the top and the table isn't in your face.
-  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.62, 1.35)
-  const handCamTarget = new THREE.Vector3(0, TABLE_Y - 0.02, 0.1)
-  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 1.35, 1.25)
-  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + 0.02, -0.1)
+  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.7, 1.45)
+  const handCamTarget = new THREE.Vector3(0, TABLE_Y - 0.05, 0.05)
+  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 1.4, 1.35)
+  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + 0.02, -0.12)
 
   function ensureHitbox(card: CardMesh) {
     if (card.getObjectByName('hitbox')) return
@@ -461,19 +461,18 @@ export function createTableScene(): TableSceneApi {
     }
 
     const n = handCards.length
-    // Compact enough for 7, tall enough to read — keep bottoms above the bezel
-    const spread = Math.min(0.105, 0.78 / Math.max(n, 1))
+    // Compact fan that fits the lower third of a 70° FOV
+    const spread = Math.min(0.095, 0.7 / Math.max(n, 1))
     const start = -((n - 1) * spread) / 2
     handCards.forEach((card, i) => {
       if (card.userData.dragging) return
       const mid = (n - 1) / 2
       card.position.x = start + i * spread
-      card.position.z = 0.008 * Math.abs(i - mid)
+      card.position.z = 0.006 * Math.abs(i - mid)
       card.userData.baseY = 0
-      // Camera-space fan: slight lean toward the player
-      card.userData.baseRotX = -0.08
-      card.userData.baseRotY = (i - mid) * -0.03
-      card.userData.baseRotZ = (i - mid) * -0.014
+      card.userData.baseRotX = -0.06
+      card.userData.baseRotY = (i - mid) * -0.028
+      card.userData.baseRotZ = (i - mid) * -0.012
       card.rotation.x = card.userData.baseRotX
       card.rotation.y = card.userData.baseRotY
       card.rotation.z = card.userData.baseRotZ
