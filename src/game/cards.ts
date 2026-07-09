@@ -1,10 +1,10 @@
 import * as THREE from 'three'
 import { Spring } from '../lib/motion'
 
-/** Compact thin cards — slight overlap in hand; peek lifts on hover. */
-export const CARD_W = 0.084
-export const CARD_H = 0.118
-export const CARD_D = 0.0015
+/** Readable thin cards — slight overlap in hand; peek lifts on hover. */
+export const CARD_W = 0.11
+export const CARD_H = 0.154
+export const CARD_D = 0.0018
 /** Table surface is a 0.05-tall cylinder centered at y=0 → top at 0.025. */
 export const TABLE_SURFACE_TOP = 0.025
 /** Card center Y so the underside rests flush on the surface (not sunk, not floating). */
@@ -60,7 +60,7 @@ function roundRect(
 }
 
 export function cardTexture(text: string, kind: 'white' | 'black' | 'back'): THREE.CanvasTexture {
-  const key = `v2|${kind}|${text}`
+  const key = `v3|${kind}|${text}`
   const hit = canvasCache.get(key)
   if (hit) return hit
 
@@ -91,10 +91,10 @@ export function cardTexture(text: string, kind: 'white' | 'black' | 'back'): THR
     ctx.fillStyle = '#121210'
     ctx.fill()
     ctx.fillStyle = '#f4f4f0'
-    ctx.font = '500 34px "DM Sans", system-ui, sans-serif'
+    ctx.font = '600 40px "DM Sans", system-ui, sans-serif'
     ctx.textAlign = 'left'
     ctx.textBaseline = 'top'
-    wrapText(ctx, text.replace(/_+/g, '____'), 56, 72, c.width - 112, 44)
+    wrapText(ctx, text.replace(/_+/g, '____'), 48, 64, c.width - 96, 50)
   } else {
     ctx.fillStyle = '#f8f8f4'
     ctx.fill()
@@ -103,10 +103,10 @@ export function cardTexture(text: string, kind: 'white' | 'black' | 'back'): THR
     roundRect(ctx, pad + 2, pad + 2, c.width - (pad + 2) * 2, c.height - (pad + 2) * 2, rr - 2)
     ctx.stroke()
     ctx.fillStyle = '#1a1a18'
-    ctx.font = '500 32px "DM Sans", system-ui, sans-serif'
+    ctx.font = '600 38px "DM Sans", system-ui, sans-serif'
     ctx.textAlign = 'left'
     ctx.textBaseline = 'top'
-    wrapText(ctx, text, 56, 72, c.width - 112, 42)
+    wrapText(ctx, text, 48, 64, c.width - 96, 48)
   }
 
   const tex = new THREE.CanvasTexture(c)

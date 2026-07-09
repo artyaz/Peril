@@ -30,8 +30,8 @@ function makeNameSprite(name: string) {
     depthWrite: false,
   })
   const sprite = new THREE.Sprite(mat)
-  sprite.scale.set(0.48, 0.12, 1)
-  sprite.position.y = 0.92
+  sprite.scale.set(0.5, 0.13, 1)
+  sprite.position.y = 0.95
   return sprite
 }
 
@@ -103,7 +103,7 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
   }
 
   const body = new THREE.Mesh(xpBodyGeometry(), bodyMat)
-  body.scale.set(0.78, 0.78, 0.56)
+  body.scale.set(0.82, 0.82, 0.58)
   body.castShadow = true
   group.add(body)
 
@@ -112,15 +112,15 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
     roughness: 0.82,
     metalness: 0,
   })
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.14, 28, 22), headMat)
-  head.position.y = 0.64
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.145, 28, 22), headMat)
+  head.position.y = 0.66
   head.scale.set(1, 1.02, 0.88)
   head.castShadow = true
   group.add(head)
 
   // Front-only face photo on a shallow sphere patch
   const faceGeo = new THREE.SphereGeometry(
-    0.143,
+    0.148,
     24,
     18,
     Math.PI * 0.22,
@@ -158,9 +158,9 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
   group.add(ring)
 
   const handAnchor = new THREE.Group()
-  // Reach toward table rim when seated below the surface
-  handAnchor.position.set(0, 0.55, 0.26)
-  handAnchor.rotation.x = -0.55
+  // Hold cards just above the table rim
+  handAnchor.position.set(0, 0.42, 0.2)
+  handAnchor.rotation.x = -0.45
   group.add(handAnchor)
 
   let faceTex: THREE.Texture | null = null
