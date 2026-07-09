@@ -2,9 +2,10 @@
   import { onDestroy, onMount } from 'svelte'
   import { route, navigate } from '../lib/router'
   import { loadSession, saveSession } from '../lib/session'
-  import { wsUrl, type RoomState, type ServerMsg, type ClientMsg } from '../lib/protocol'
+  import type { RoomState, ServerMsg, ClientMsg } from '../lib/protocol'
   import { blankify } from '../lib/packs'
   import type { TableSceneApi } from '../game/TableScene'
+  import { connectRoom, type RoomTransport } from '../lib/transport'
 
   const r = $route
   const code = r.name === 'table' || r.name === 'lobby' ? r.code : ''
@@ -15,7 +16,7 @@
   let lookClose = $state(false)
   let canvasHost: HTMLDivElement | null = $state(null)
   let scene: TableSceneApi | null = null
-  let ws: WebSocket | null = null
+  let transport: RoomTransport | null = null
   let hoverTimer: ReturnType<typeof setTimeout> | null = null
 
   const phaseLabel = $derived(
@@ -54,51 +55,41 @@
   })
 
   onDestroy(() => {
-    ws?.close()
+    transport?.close()
     scene?.unmount()
     if (hoverTimer) clearTimeout(hoverTimer)
   })
 
   function connect() {
-    ws?.close()
-    ws = new WebSocket(wsUrl())
-    ws.onopen = () => {
-      const msg: ClientMsg = {
-        type: 'hello',
-        playerId: session!.id,
-        name: session!.name,
-        faceDataUrl: session!.faceDataUrl,
-        roomCode: code,
-      }
-      ws!.send(JSON.stringify(msg))
-    }
-    ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data) as ServerMsg
-      if (msg.type === 'ip' && session) {
-        saveSession({ ...session, lastIpHint: msg.ip })
-      }
-      if (msg.type === 'error') error = msg.message
-      if (msg.type === 'peer_hover') {
-        scene?.setPeerHover(msg.playerId, msg.cardIndex)
-      }
-      if (msg.type === 'state') {
-        room = msg.state
-        if (msg.state.phase === 'lobby') {
-          navigate({ name: 'lobby', code: msg.state.code })
-          return
+    transport?.close()
+    transport = connectRoom({
+      playerId: session!.id,
+      name: session!.name,
+      roomCode: code,
+      faceDataUrl: session!.faceDataUrl,
+      onMessage: (msg: ServerMsg) => {
+        if (msg.type === 'ip' && session) {
+          saveSession({ ...session, lastIpHint: msg.ip })
         }
-        if (session) scene?.setState(msg.state, session.id)
-      }
-    }
-    ws.onclose = () => {
-      setTimeout(() => {
-        if (document.visibilityState !== 'hidden') connect()
-      }, 1200)
-    }
+        if (msg.type === 'error') error = msg.message
+        if (msg.type === 'peer_hover') {
+          scene?.setPeerHover(msg.playerId, msg.cardIndex)
+        }
+        if (msg.type === 'state') {
+          room = msg.state
+          if (msg.state.phase === 'lobby') {
+            navigate({ name: 'lobby', code: msg.state.code })
+            return
+          }
+          if (session) scene?.setState(msg.state, session.id)
+        }
+      },
+      onError: (m) => { error = m },
+    })
   }
 
   function send(msg: ClientMsg) {
-    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
+    transport?.send(msg)
   }
 
   function toggleLook() {

@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { navigate } from '../lib/router'
   import { loadSession, saveSession, makePlayerId, makeRoomCode, recentRooms, rememberRoom } from '../lib/session'
+  import { createRoomHttp } from '../lib/transport'
 
   let name = $state(loadSession()?.name || '')
   let joinCode = $state('')
@@ -11,7 +12,6 @@
   let error = $state('')
 
   onMount(() => {
-    // Prefetch pack index quietly
     void fetch('/data/packs-index.json')
   })
 
@@ -33,19 +33,14 @@
         faceDataUrl: loadSession()?.faceDataUrl,
       })
       rememberRoom(code, roomName.trim() || 'Untitled')
-      const res = await fetch('/api/rooms', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: roomName.trim() || 'Untitled',
-          hostId: playerId,
-          packIds: ['cah-base-set'],
-          maxPlayers: 4,
-          code,
-        }),
+      const data = await createRoomHttp({
+        name: roomName.trim() || 'Untitled',
+        hostId: playerId,
+        playerName: name.trim().slice(0, 24),
+        packIds: ['cah-base-set'],
+        code,
+        faceDataUrl: loadSession()?.faceDataUrl,
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Could not create room')
       navigate({ name: 'lobby', code: data.code })
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed'
@@ -79,11 +74,13 @@
 </script>
 
 <div class="page">
-  <div class="shell fade-in">
-    <h1 class="brand">Peril</h1>
-    <p class="lede">A minimal table for terrible people. No accounts — just a code, a name, and bad decisions.</p>
+  <div class="shell fade-in home">
+    <header class="hero">
+      <h1 class="brand">Peril</h1>
+      <p class="lede">A minimal table for terrible people. No accounts — just a code, a name, and bad decisions.</p>
+    </header>
 
-    <div class="panel stack" style="max-width: 28rem">
+    <div class="panel stack form">
       <div class="field">
         <label for="name">Your name</label>
         <input id="name" maxlength="24" placeholder="Something regrettable" bind:value={name} />
@@ -94,25 +91,31 @@
         <input id="room" maxlength="40" placeholder="Living Room" bind:value={roomName} />
       </div>
 
-      <div class="row">
-        <button class="primary" disabled={busy} onclick={createRoom}>Create room</button>
-      </div>
+      <button class="primary wide" disabled={busy} onclick={createRoom}>
+        {busy ? 'Creating…' : 'Create room'}
+      </button>
 
-      <div class="divider"></div>
+      <div class="or"><span>or join</span></div>
 
       <div class="field">
-        <label for="code">Join with code</label>
-        <div class="row">
-          <input id="code" maxlength="8" placeholder="AB12C" bind:value={joinCode} style="flex:1; text-transform:uppercase; letter-spacing:.12em" />
-          <button onclick={() => joinRoom()}>Join</button>
+        <label for="code">Room code</label>
+        <div class="row join">
+          <input
+            id="code"
+            maxlength="8"
+            placeholder="AB12C"
+            bind:value={joinCode}
+            class="code"
+          />
+          <button type="button" onclick={() => joinRoom()}>Join</button>
         </div>
       </div>
 
       {#if recent.length}
-        <div class="muted">Recent</div>
-        <div class="row">
+        <div class="muted recent-label">Recent</div>
+        <div class="row chips">
           {#each recent as r}
-            <button class="ghost" onclick={() => joinRoom(r.code)}>{r.code}</button>
+            <button type="button" class="chip" onclick={() => joinRoom(r.code)}>{r.code}</button>
           {/each}
         </div>
       {/if}
@@ -125,20 +128,69 @@
 </div>
 
 <style>
-  .divider {
+  .home {
+    display: grid;
+    align-content: center;
+    min-height: 100%;
+    gap: 0;
+  }
+  .hero {
+    margin-bottom: 2rem;
+  }
+  .form {
+    max-width: 26rem;
+  }
+  .wide {
+    width: 100%;
+  }
+  .or {
+    display: grid;
+    place-items: center;
+    position: relative;
+    color: var(--mute);
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin: 0.25rem 0;
+  }
+  .or::before {
+    content: '';
+    position: absolute;
+    inset: 50% 0 auto;
     height: 1px;
     background: var(--line);
-    margin: 0.4rem 0;
   }
-  .ghost {
+  .or span {
+    position: relative;
+    background: rgba(250, 250, 248, 0.95);
+    padding: 0 0.65rem;
+  }
+  .join {
+    width: 100%;
+  }
+  .code {
+    flex: 1;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-variant-numeric: tabular-nums;
+  }
+  .chips {
+    gap: 0.5rem;
+  }
+  .chip {
     background: transparent;
-    font-size: 0.85rem;
-    padding: 0.45rem 0.85rem;
-    letter-spacing: 0.08em;
+    box-shadow: none;
+    font-size: 0.82rem;
+    padding: 0.45rem 0.8rem;
+    letter-spacing: 0.1em;
+  }
+  .recent-label {
+    margin-top: 0.25rem;
   }
   .err {
     color: #8a3a32;
     margin: 0;
     font-size: 0.9rem;
+    line-height: 1.4;
   }
 </style>

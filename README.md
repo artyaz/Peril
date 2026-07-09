@@ -23,11 +23,26 @@ npm run dev
 
 Client: `http://127.0.0.1:5173` · API/WS: `:8787`
 
-## Production
+## Deploy (Vercel)
+
+Static frontend + `/api/rooms` serverless function.
+
+1. Connect the repo to Vercel
+2. Optional but recommended for multiplayer across instances: add **Upstash Redis** and set
+   - `UPSTASH_REDIS_REST_URL`
+   - `UPSTASH_REDIS_REST_TOKEN`
+3. Without Redis, rooms still work in-memory per serverless instance (fine for solo / same-region demos)
+
+Local full stack (WS + API):
 
 ```bash
-npm run build
-npm start
+npm run dev
+```
+
+Production local:
+
+```bash
+npm run build && npm start
 ```
 
 ## Play

@@ -39,6 +39,7 @@ export type RoomState = {
   votes: Record<string, string> // voterId -> submission playerId
   winnerId: string | null
   round: number
+  updatedAt?: number
   you?: {
     hand: string[]
     selected: string[]
