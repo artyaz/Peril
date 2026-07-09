@@ -58,8 +58,8 @@ const DRAG_STIFF = 420
 const DRAG_DAMP = 34
 /** Local hand in camera space: negative Y = lower viewport; farther Z = smaller on screen. */
 const HAND_CAM_X = 0
-const HAND_CAM_Y = -0.22
-const HAND_CAM_Z = -0.55
+const HAND_CAM_Y = -0.18
+const HAND_CAM_Z = -0.52
 const FOV_HAND = 70
 const FOV_TABLE = 58
 
@@ -500,7 +500,7 @@ export function createTableScene(): TableSceneApi {
     }
     while (cards.length < handCount) {
       const card = createCard('Peril', 'back')
-      card.scale.setScalar(0.9)
+      card.scale.setScalar(0.95)
       const i = cards.length
       card.userData.index = i
       handle.handAnchor.add(card)
@@ -509,7 +509,7 @@ export function createTableScene(): TableSceneApi {
 
     // Yaw toward camera only — keep world-up so cards stay portrait like the local hand.
     // Full lookAt tilts them flat from our elevated seat and reads as "horizontal".
-    handle.handAnchor.position.set(0, 0.36, 0.28)
+    handle.handAnchor.position.set(0, 0.34, 0.3)
     let faceYaw = 0
     if (camera) {
       const anchorWorld = new THREE.Vector3()
@@ -518,26 +518,26 @@ export function createTableScene(): TableSceneApi {
       const dz = camera.position.z - anchorWorld.z
       faceYaw = Math.atan2(dx, dz) - handle.group.rotation.y
     }
-    handle.handAnchor.rotation.set(-0.35, faceYaw, 0)
+    // Strong lean toward the local seat so cards read tall like your hand
+    handle.handAnchor.rotation.set(-0.55, faceYaw, 0)
 
     const n = cards.length
-    const spread = Math.min(0.09, 0.58 / Math.max(n, 1))
+    const spread = Math.min(0.095, 0.62 / Math.max(n, 1))
     const start = -((n - 1) * spread) / 2
     cards.forEach((card, i) => {
       const mid = (n - 1) / 2
       const isPeek = hoverIdx === i
       card.position.x = start + i * spread
-      card.position.y = isPeek ? 0.04 : 0
-      card.position.z = 0.008 * Math.abs(i - mid)
-      card.userData.baseY = isPeek ? 0.04 : 0
-      // Same upright fan language as the local camera-space hand
-      card.userData.baseRotX = isPeek ? -0.04 : -0.08
-      card.userData.baseRotY = (i - mid) * -0.03
-      card.userData.baseRotZ = (i - mid) * -0.014
+      card.position.y = isPeek ? 0.045 : 0
+      card.position.z = 0.01 * Math.abs(i - mid)
+      card.userData.baseY = isPeek ? 0.045 : 0
+      card.userData.baseRotX = isPeek ? -0.02 : -0.06
+      card.userData.baseRotY = (i - mid) * -0.032
+      card.userData.baseRotZ = (i - mid) * -0.016
       card.rotation.x = card.userData.baseRotX
       card.rotation.y = card.userData.baseRotY
       card.rotation.z = card.userData.baseRotZ
-      if (Math.abs(card.scale.x - 0.9) > 0.01) card.scale.setScalar(0.9)
+      if (Math.abs(card.scale.x - 0.95) > 0.01) card.scale.setScalar(0.95)
       swapPeerCardFace(card, isPeek ? peekText : null, isPeek)
     })
   }
