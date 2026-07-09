@@ -123,6 +123,9 @@ export type CardMesh = THREE.Mesh & {
     lift: Spring
     tiltX: Spring
     tiltZ: Spring
+    /** Soft layout springs for hand reorder / settle */
+    posX: Spring
+    posZ: Spring
     baseY: number
     baseRotX: number
     baseRotY: number
@@ -134,6 +137,35 @@ export type CardMesh = THREE.Mesh & {
     dragging?: boolean
     pinned?: boolean
   }
+}
+
+/** Swap face textures in place — keeps the same mesh so throws/drags stay continuous. */
+export function setCardFace(card: CardMesh, text: string, kind: 'white' | 'black' | 'back') {
+  if (card.userData.kind === kind && card.userData.cardText === text) return
+  const faceMap = cardTexture(text, kind === 'back' ? 'back' : kind)
+  const logoMap = cardTexture('Peril', 'back')
+  const mats = card.material as THREE.MeshStandardMaterial[]
+  // +x -x +y -y +z -z  → faces are index 4 and 5
+  const face = mats[4]
+  const rear = mats[5]
+  if (face?.map) {
+    // Don't dispose cached textures
+    face.map = faceMap
+    face.needsUpdate = true
+  }
+  if (rear) {
+    rear.map = kind === 'back' ? logoMap : faceMap
+    rear.needsUpdate = true
+  }
+  if (mats[0]) {
+    const edgeColor = kind === 'black' ? '#0e0e0c' : '#f0f0ec'
+    for (let i = 0; i < 4; i++) {
+      mats[i].color.set(edgeColor)
+      mats[i].needsUpdate = true
+    }
+  }
+  card.userData.kind = kind
+  card.userData.cardText = text
 }
 
 /**
@@ -173,6 +205,8 @@ export function createCard(text: string, kind: 'white' | 'black' | 'back' = 'whi
     lift: new Spring(0, 360, 30),
     tiltX: new Spring(0, 300, 28),
     tiltZ: new Spring(0, 300, 28),
+    posX: new Spring(0, 280, 26),
+    posZ: new Spring(0, 280, 26),
     baseY: 0,
     baseRotX: 0,
     baseRotY: 0,

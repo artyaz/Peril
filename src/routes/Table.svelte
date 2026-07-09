@@ -204,7 +204,7 @@
         {#if myVote}
           You voted for {voteTargetName}
         {:else}
-          Click a white card on the table to vote
+          Hover a play to highlight · click to vote
         {/if}
       </div>
       <div class="hint-sub">
