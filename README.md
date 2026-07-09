@@ -8,7 +8,8 @@ No accounts. Rooms are codes + names. Session lives in `localStorage` and rebind
 
 - Vite + Svelte 5
 - Three.js table scene (lazy-loaded)
-- Node WebSocket server for rooms
+- Server-authoritative HTTP room engine with monotonic state revisions
+- Upstash Redis for shared production rooms (in-memory rooms in local Node)
 
 ## Packs
 
@@ -28,12 +29,12 @@ Client: `http://127.0.0.1:5173` · API/WS: `:8787`
 Static frontend + `/api/rooms` serverless function.
 
 1. Connect the repo to Vercel
-2. Optional but recommended for multiplayer across instances: add **Upstash Redis** and set
+2. Add **Upstash Redis** for multiplayer across serverless instances and set
    - `UPSTASH_REDIS_REST_URL`
    - `UPSTASH_REDIS_REST_TOKEN`
-3. Without Redis, rooms still work in-memory per serverless instance (fine for solo / same-region demos)
+3. Deploy. The API refuses to create a misleading ephemeral room when Redis is missing on Vercel.
 
-Local full stack (WS + API):
+Local full stack:
 
 ```bash
 npm run dev
@@ -51,8 +52,9 @@ npm run build && npm start
 2. Host picks packs (default: Base Set)
 3. Optional face photo (stretched onto the front of your XP-gray head)
 4. Start — bots auto-fill if you’re alone
-5. Hover cards to peek (synced to peers), click to play, vote for the best
+5. Grab cards and drag them onto the table
+6. Vote from the accessible play picker or directly on a table card
 
 ## Motion
 
-Card hover/lift uses spring physics (bg3d-inspired). Deals and drops use anticipation + overshoot (`easeOutBack`). Look-closer blends the camera onto the table surface.
+Cards track the pointer directly while held, retain the grabbed point across hand/table planes, and use sub-stepped spring physics only for hover and release motion. Deals and drops use anticipation + overshoot (`easeOutBack`).

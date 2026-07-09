@@ -6,10 +6,15 @@ export type NetPlayer = {
   connected: boolean
   faceDataUrl?: string
   isHost: boolean
+  isBot?: boolean
+  /** False when a player joined after the current round began. */
+  activeThisRound?: boolean
   handCount?: number
 }
 
 export type PlayedSubmission = {
+  /** Stable, anonymous identity that does not change when cards are revealed. */
+  id: string
   playerId: string
   cards: string[]
   revealed: boolean
@@ -59,7 +64,17 @@ export type RoomState = {
   votes: Record<string, string> // voterId -> submission playerId
   winnerId: string | null
   round: number
+  /** Monotonic room version used to reject stale/out-of-order responses. */
+  revision?: number
   updatedAt?: number
+  phaseStartedAt?: number
+  phaseEndsAt?: number | null
+  progress?: {
+    submitted: number
+    submissionsRequired: number
+    votesCast: number
+    votersRequired: number
+  }
   /** playerId → hovered card index (or null) — synced so peers see peeks */
   hover?: Record<string, number | null>
   /** playerId → text of the card currently being peeked (if any) */
@@ -96,6 +111,8 @@ export type ServerMsg =
   | { type: 'peer_drag'; drag: CardDrag | null }
   | { type: 'ip'; ip: string }
   | { type: 'joined'; playerId: string; code: string }
+
+export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'offline'
 
 export function wsUrl() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
