@@ -430,6 +430,7 @@ function runBots(room) {
     }
   }
   if (room.phase === 'voting') {
+    // One bot vote per tick so humans see their green confirmation before resolve
     for (const p of Object.values(room.players)) {
       if (!p.isBot || room.votes[p.id]) continue
       const options = room.submissions.map((s) => s.playerId).filter((id) => id !== p.id)
@@ -437,6 +438,7 @@ function runBots(room) {
       try {
         vote(room, p.id, options[Math.floor(Math.random() * options.length)])
       } catch { /* ignore */ }
+      break
     }
   }
   return room
@@ -507,10 +509,14 @@ function applyAction(room, action) {
     }
     case 'vote':
       vote(room, playerId, action.submissionPlayerId)
-      runBots(room)
+      // Don't resolve with bots in the same request — voter needs to see green confirm.
+      // Bots catch up on subsequent state polls.
       break
     case 'next_round':
       nextRound(room)
+      runBots(room)
+      break
+    case 'tick_bots':
       runBots(room)
       break
     case 'leave': {
