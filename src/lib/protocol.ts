@@ -40,6 +40,10 @@ export type RoomState = {
   winnerId: string | null
   round: number
   updatedAt?: number
+  /** playerId → hovered card index (or null) — synced so peers see peeks */
+  hover?: Record<string, number | null>
+  /** playerId → text of the card currently being peeked (if any) */
+  hoverText?: Record<string, string | null>
   you?: {
     hand: string[]
     selected: string[]
@@ -53,7 +57,7 @@ export type ClientMsg =
   | { type: 'start' }
   | { type: 'add_bot' }
   | { type: 'play_cards'; cards: string[] }
-  | { type: 'hover_card'; cardIndex: number | null }
+  | { type: 'hover_card'; cardIndex: number | null; cardText?: string | null }
   | { type: 'vote'; submissionPlayerId: string }
   | { type: 'next_round' }
   | { type: 'czar_pick'; submissionPlayerId: string }
@@ -62,7 +66,7 @@ export type ClientMsg =
 export type ServerMsg =
   | { type: 'state'; state: RoomState }
   | { type: 'error'; message: string }
-  | { type: 'peer_hover'; playerId: string; cardIndex: number | null }
+  | { type: 'peer_hover'; playerId: string; cardIndex: number | null; cardText?: string | null }
   | { type: 'ip'; ip: string }
   | { type: 'joined'; playerId: string; code: string }
 

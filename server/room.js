@@ -69,6 +69,7 @@ class Room {
     this.winnerId = null
     this.round = 0
     this.hover = {} // playerId -> cardIndex|null
+    this.hoverText = {} // playerId -> peeked card text|null
   }
 
   publicMeta() {
@@ -132,6 +133,8 @@ class Room {
       votes: this.votes,
       winnerId: this.winnerId,
       round: this.round,
+      hover: this.hover || {},
+      hoverText: this.hoverText || {},
       you: you
         ? { hand: you.hand, selected: you.selected }
         : undefined,
@@ -317,6 +320,7 @@ class Room {
     this.votes = {}
     this.winnerId = null
     this.hover = {}
+    this.hoverText = {}
     for (const p of this.players.values()) p.selected = []
 
     const players = [...this.players.values()].sort((a, b) => a.seat - b.seat)
@@ -522,8 +526,12 @@ function attachClient(ws, ip) {
           room.playCards(playerId, msg.cards)
           setTimeout(() => room.runBots(), 500)
           break
-        case 'hover_card':
+        case 'hover_card': {
           room.hover[playerId] = msg.cardIndex
+          const player = room.players.get(playerId)
+          if (msg.cardIndex == null) room.hoverText[playerId] = null
+          else if (typeof msg.cardText === 'string') room.hoverText[playerId] = msg.cardText
+          else room.hoverText[playerId] = player?.hand?.[msg.cardIndex] || null
           for (const [id, sock] of room.sockets) {
             if (id === playerId) continue
             if (sock.readyState === WebSocket.OPEN) {
@@ -531,10 +539,12 @@ function attachClient(ws, ip) {
                 type: 'peer_hover',
                 playerId,
                 cardIndex: msg.cardIndex,
+                cardText: room.hoverText[playerId] ?? null,
               }))
             }
           }
           break
+        }
         case 'vote':
           room.vote(playerId, msg.submissionPlayerId)
           setTimeout(() => room.runBots(), 400)

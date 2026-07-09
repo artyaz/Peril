@@ -85,6 +85,7 @@ function blankRoom({ code, name, hostId, packIds, maxPlayers }) {
     winnerId: null,
     round: 0,
     hover: {},
+    hoverText: {},
     updatedAt: Date.now(),
   }
 }
@@ -134,6 +135,8 @@ function stateFor(room, viewerId) {
     votes: room.votes || {},
     winnerId: room.winnerId,
     round: room.round,
+    hover: room.hover || {},
+    hoverText: room.hoverText || {},
     you: you ? { hand: you.hand || [], selected: you.selected || [] } : undefined,
     updatedAt: room.updatedAt,
   }
@@ -264,6 +267,7 @@ function beginRound(room) {
   room.votes = {}
   room.winnerId = null
   room.hover = {}
+  room.hoverText = {}
   for (const p of Object.values(room.players)) p.selected = []
   const players = playerList(room)
   room.czarId = players[(room.round - 1) % players.length].id
@@ -421,6 +425,14 @@ function applyAction(room, action) {
       break
     case 'hover_card':
       room.hover[playerId] = action.cardIndex
+      if (action.cardIndex == null) {
+        room.hoverText[playerId] = null
+      } else if (typeof action.cardText === 'string') {
+        room.hoverText[playerId] = action.cardText
+      } else {
+        const hand = room.players[playerId]?.hand || []
+        room.hoverText[playerId] = hand[action.cardIndex] || null
+      }
       break
     case 'vote':
       vote(room, playerId, action.submissionPlayerId)

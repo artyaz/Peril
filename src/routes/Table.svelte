@@ -42,9 +42,13 @@
       scene = mod.createTableScene()
       if (canvasHost) scene.mount(canvasHost)
       scene.onPlayCards = (cards) => send({ type: 'play_cards', cards })
-      scene.onHoverCard = (index) => {
+      scene.onHoverCard = (index, text) => {
         if (hoverTimer) clearTimeout(hoverTimer)
-        hoverTimer = setTimeout(() => send({ type: 'hover_card', cardIndex: index }), 40)
+        hoverTimer = setTimeout(() => send({
+          type: 'hover_card',
+          cardIndex: index,
+          cardText: text ?? null,
+        }), 40)
       }
       scene.onVote = (submissionPlayerId) => send({ type: 'vote', submissionPlayerId })
       if (room && session) scene.setState(room, session.id)
@@ -73,7 +77,7 @@
         }
         if (msg.type === 'error') error = msg.message
         if (msg.type === 'peer_hover') {
-          scene?.setPeerHover(msg.playerId, msg.cardIndex)
+          scene?.setPeerHover(msg.playerId, msg.cardIndex, msg.cardText)
         }
         if (msg.type === 'state') {
           room = msg.state
@@ -90,11 +94,6 @@
 
   function send(msg: ClientMsg) {
     transport?.send(msg)
-  }
-
-  function toggleLook() {
-    lookClose = !lookClose
-    scene?.lookCloser(lookClose)
   }
 
   function nextRound() {
@@ -116,13 +115,12 @@
       <div class="phase">{phaseLabel}</div>
     </div>
     <div class="row">
-      <button class="ghost" onclick={toggleLook}>{lookClose ? 'Sit back' : 'Look closer'}</button>
-      <button class="ghost" onclick={() => navigate({ name: 'home' })}>Leave</button>
+      <button class="ghost" type="button" onclick={() => navigate({ name: 'home' })}>Leave</button>
     </div>
   </header>
 
-  {#if room?.blackCard && !lookClose}
-    <div class="prompt fade-in">
+  {#if room?.blackCard}
+    <div class="prompt fade-in" class:dim={lookClose}>
       {blankify(room.blackCard.text)}
       {#if room.blackCard.pick > 1}
         <span class="pick">pick {room.blackCard.pick}</span>
@@ -140,11 +138,11 @@
   </aside>
 
   {#if room?.phase === 'playing'}
-    <div class="hint">{room.czarId === session?.id ? 'Waiting for plays…' : 'Hover to peek · click to play'}</div>
+    <div class="hint">{room.czarId === session?.id ? 'Waiting for plays…' : 'Bottom: your cards · top: look at the table'}</div>
   {/if}
 
   {#if room?.phase === 'voting'}
-    <div class="hint">Look closer · click a submission · everyone votes</div>
+    <div class="hint">Move up to the table · click a play to vote</div>
   {/if}
 
   {#if room?.phase === 'scoring'}
@@ -191,6 +189,30 @@
     pointer-events: none;
   }
   .hud .row, .hud button { pointer-events: auto; }
+  .scores {
+    position: absolute;
+    z-index: 2;
+    right: 1rem;
+    top: 50%;
+    transform: translateY(-50%);
+    display: grid;
+    gap: 0.4rem;
+    pointer-events: none;
+  }
+  .hint {
+    position: absolute;
+    z-index: 2;
+    bottom: 1.1rem;
+    left: 50%;
+    transform: translateX(-50%);
+    color: var(--mute);
+    font-size: 0.85rem;
+    letter-spacing: 0.02em;
+    pointer-events: none;
+  }
+  .prompt {
+    pointer-events: none;
+  }
   .room {
     font-size: 0.8rem;
     letter-spacing: 0.06em;
@@ -221,7 +243,9 @@
     color: var(--ink);
     text-shadow: 0 1px 0 rgba(255,255,255,.5);
     pointer-events: none;
+    transition: opacity 280ms ease;
   }
+  .prompt.dim { opacity: 0.35; }
   .pick {
     display: inline-block;
     margin-left: 0.5rem;
@@ -231,15 +255,6 @@
     text-transform: uppercase;
     color: var(--mute);
     vertical-align: middle;
-  }
-  .scores {
-    position: absolute;
-    z-index: 2;
-    right: 1rem;
-    top: 50%;
-    transform: translateY(-50%);
-    display: grid;
-    gap: 0.4rem;
   }
   .score {
     display: flex;
@@ -258,17 +273,6 @@
     content: ' ★';
     font-weight: 400;
     color: var(--mute);
-  }
-  .hint {
-    position: absolute;
-    z-index: 2;
-    bottom: 1.1rem;
-    left: 50%;
-    transform: translateX(-50%);
-    color: var(--mute);
-    font-size: 0.85rem;
-    letter-spacing: 0.02em;
-    pointer-events: none;
   }
   .banner {
     position: absolute;
