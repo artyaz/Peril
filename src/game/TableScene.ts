@@ -44,7 +44,7 @@ type LocalDrag = {
 }
 
 const TABLE_Y = 1.55
-const TABLE_RADIUS = 1.15
+const TABLE_RADIUS = 0.72
 const HAND_ZONE_Y = 0.48
 const DRAG_BROADCAST_MS = 50
 const CLICK_MOVE_PX = 8
@@ -103,11 +103,11 @@ export function createTableScene(): TableSceneApi {
   /** Staged local drops before submitting (for pick > 1) */
   let stagedPlays: { text: string; x: number; z: number; rotY: number; card: CardMesh }[] = []
 
-  // Hand: look across cards. Table: rise over the surface and tip clearly downward.
-  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.3, 1.38)
-  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.04, 0.62)
-  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 1.85, 0.72)
-  const tableCamTarget = new THREE.Vector3(0, TABLE_Y - 0.08, -0.15)
+  // Hand: look across cards. Table: rise and tip down onto the smaller surface.
+  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.28, 1.15)
+  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.04, 0.48)
+  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 1.35, 0.85)
+  const tableCamTarget = new THREE.Vector3(0, TABLE_Y - 0.04, -0.12)
 
   function ensureHitbox(card: CardMesh) {
     if (card.getObjectByName('hitbox')) return
@@ -188,7 +188,7 @@ export function createTableScene(): TableSceneApi {
     tableGroup.add(surface)
 
     const pedestal = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.38, 0.62, TABLE_Y * 0.92, 32, 1, true),
+      new THREE.CylinderGeometry(0.22, 0.38, TABLE_Y * 0.92, 32, 1, true),
       new THREE.MeshStandardMaterial({
         color: '#d0d0cc',
         transparent: true,
@@ -202,7 +202,7 @@ export function createTableScene(): TableSceneApi {
     tableGroup.add(pedestal)
 
     const leg = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.1, 0.16, TABLE_Y * 0.9, 16),
+      new THREE.CylinderGeometry(0.07, 0.11, TABLE_Y * 0.9, 16),
       new THREE.MeshStandardMaterial({ color: '#c8c8c4', roughness: 0.9, metalness: 0 }),
     )
     leg.position.y = -TABLE_Y * 0.45
@@ -210,7 +210,7 @@ export function createTableScene(): TableSceneApi {
     tableGroup.add(leg)
 
     const blob = new THREE.Mesh(
-      new THREE.CircleGeometry(TABLE_RADIUS + 0.25, 48),
+      new THREE.CircleGeometry(TABLE_RADIUS + 0.15, 48),
       new THREE.MeshBasicMaterial({ color: '#b0b0aa', transparent: true, opacity: 0.16 }),
     )
     blob.rotation.x = -Math.PI / 2
@@ -248,7 +248,7 @@ export function createTableScene(): TableSceneApi {
     scene.add(fill)
 
     handGroup = new THREE.Group()
-    handGroup.position.set(0, TABLE_Y + 0.08, 1.02)
+    handGroup.position.set(0, TABLE_Y + 0.06, 0.82)
     scene.add(handGroup)
 
     const canvas = threeRenderer.domElement
@@ -458,7 +458,7 @@ export function createTableScene(): TableSceneApi {
       card.rotation.y = card.userData.baseRotY
       card.rotation.z = card.userData.baseRotZ
     })
-    handGroup.position.set(0, TABLE_Y + 0.08, 1.02)
+    handGroup.position.set(0, TABLE_Y + 0.06, 0.82)
   }
 
   function layoutPeerHand(
@@ -481,7 +481,7 @@ export function createTableScene(): TableSceneApi {
     }
     while (cards.length < handCount) {
       const card = createCard('Peril', 'back')
-      card.scale.setScalar(0.72)
+      card.scale.setScalar(0.62)
       const i = cards.length
       card.userData.index = i
       handle.handAnchor.add(card)
@@ -526,9 +526,9 @@ export function createTableScene(): TableSceneApi {
     const peerLayouts: SeatLayout[] = peers.map((_, i) => {
       const n = peers.length
       const t = n === 1 ? 0.5 : i / (n - 1)
-      // Far arc just outside the table rim
-      const angle = -0.85 + t * 1.7
-      const dist = TABLE_RADIUS + 0.22
+      // Far arc just outside the smaller table rim
+      const angle = -0.9 + t * 1.8
+      const dist = TABLE_RADIUS + 0.28
       return {
         position: new THREE.Vector3(Math.sin(angle) * dist, 0, -Math.cos(angle) * dist),
         yaw: Math.atan2(-Math.sin(angle), Math.cos(angle)),
@@ -549,8 +549,8 @@ export function createTableScene(): TableSceneApi {
       }
     }
 
-    // Avatar origin low so the XP chest sits at the table rim (not in the sky)
-    const sitY = TABLE_Y - 0.88
+    // Compact 3D figure: feet near ground, chest near table rim
+    const sitY = 0.12
     peers.forEach((p, i) => {
       const seat = peerLayouts[i]
       if (!seat) return
@@ -560,14 +560,14 @@ export function createTableScene(): TableSceneApi {
         handle = createAvatar(p.name, p.faceDataUrl)
         avatars.set(p.id, handle)
         worldGroup!.add(handle.group)
-        handle.group.position.set(seat.position.x, sitY - 0.2, seat.position.z)
+        handle.group.position.set(seat.position.x, sitY - 0.15, seat.position.z)
         handle.group.rotation.y = seat.yaw
         const target = handle
-        const fromY = sitY - 0.2
+        const fromY = sitY - 0.15
         tweens.tween(
           0.75,
           (v) => {
-            target.group.position.y = fromY + v * 0.2
+            target.group.position.y = fromY + v * 0.15
           },
           easeOutBack,
         )
@@ -610,9 +610,9 @@ export function createTableScene(): TableSceneApi {
       blackCard.userData.baseRotY = 0
       blackCard.userData.baseRotZ = 0
       blackCard.rotation.x = TABLE_FACE_UP_X
-      blackCard.position.set(0, TABLE_CARD_Y, -0.28)
+      blackCard.position.set(0, TABLE_CARD_Y, -0.18)
       blackCard.userData.baseY = TABLE_CARD_Y
-      blackCard.scale.setScalar(1.0)
+      blackCard.scale.setScalar(0.92)
       tableGroup.add(blackCard)
       dropCard(blackCard, 0.8, TABLE_CARD_Y)
       blackCard.userData.lift.velocity = -2.5
@@ -1423,8 +1423,8 @@ export function createTableScene(): TableSceneApi {
     if (handGroup) {
       const handOpacity = 1 - camBlend.value
       handGroup.visible = handOpacity > 0.08
-      handGroup.position.y = TABLE_Y + 0.08 - camBlend.value * 0.4
-      handGroup.position.z = 1.02 + camBlend.value * 0.4
+      handGroup.position.y = TABLE_Y + 0.06 - camBlend.value * 0.35
+      handGroup.position.z = 0.82 + camBlend.value * 0.35
     }
 
     const inHandZone = !lookClose && zoneFromPointer(pointerScreenY) === 'hand'
@@ -1449,9 +1449,9 @@ export function createTableScene(): TableSceneApi {
     }
 
     const t = clock.elapsedTime
-    const sitY = TABLE_Y - 0.88
+    const sitY = 0.12
     for (const [id, a] of avatars) {
-      a.group.position.y = sitY + Math.sin(t * 1.1 + a.group.position.x * 2) * 0.008
+      a.group.position.y = sitY + Math.sin(t * 1.1 + a.group.position.x * 2) * 0.006
       const hoverIdx = peerHover.get(id) ?? null
       const peekText = peerHoverText.get(id) ?? null
       const cards = peerHands.get(id)
