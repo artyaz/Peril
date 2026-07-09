@@ -9,8 +9,11 @@ export const CARD_D = 0.0018
 export const TABLE_SURFACE_TOP = 0.025
 /** Card center Y so the underside rests flush on the surface (not sunk, not floating). */
 export const TABLE_CARD_Y = TABLE_SURFACE_TOP + CARD_D / 2 + 0.0004
-/** Face-up flat on table: +Z face points up after this X rotation. */
-export const TABLE_FACE_UP_X = Math.PI / 2
+/**
+ * Face-up flat on table: rotate +Z (text face) toward world +Y.
+ * Right-hand X rotation of −π/2 maps +Z → +Y.
+ */
+export const TABLE_FACE_UP_X = -Math.PI / 2
 
 const canvasCache = new Map<string, THREE.CanvasTexture>()
 

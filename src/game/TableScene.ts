@@ -245,7 +245,7 @@ export function createTableScene(): TableSceneApi {
     scene.add(fill)
 
     handGroup = new THREE.Group()
-    handGroup.position.set(0, TABLE_Y + 0.05, 0.78)
+    handGroup.position.set(0, TABLE_Y + 0.1, 1.08)
     scene.add(handGroup)
 
     const canvas = threeRenderer.domElement
@@ -454,7 +454,7 @@ export function createTableScene(): TableSceneApi {
       card.rotation.y = card.userData.baseRotY
       card.rotation.z = card.userData.baseRotZ
     })
-    handGroup.position.set(0, TABLE_Y + 0.04, 0.92)
+    handGroup.position.set(0, TABLE_Y + 0.1, 1.08)
   }
 
   function layoutPeerHand(
@@ -840,9 +840,9 @@ export function createTableScene(): TableSceneApi {
           !wasLocal &&
           Math.abs(card.userData.baseRotX - TABLE_FACE_UP_X) > 0.01
         if (needsFlip) {
-          // Start face-down-ish then flip to face-up
-          card.userData.baseRotX = -TABLE_FACE_UP_X
-          card.rotation.x = -TABLE_FACE_UP_X
+          // Start face-down (+π/2) then flip to face-up (TABLE_FACE_UP_X = −π/2)
+          card.userData.baseRotX = Math.PI / 2
+          card.rotation.x = Math.PI / 2
           const delay = d.subIndex * 0.07 + d.cardIndex * 0.04
           const start = performance.now()
           const target = card
@@ -855,7 +855,7 @@ export function createTableScene(): TableSceneApi {
             tweens.tween(
               0.4,
               (v) => {
-                target.userData.baseRotX = -TABLE_FACE_UP_X + v * Math.PI
+                target.userData.baseRotX = Math.PI / 2 - v * Math.PI
                 target.rotation.x = target.userData.baseRotX
               },
               easeOutBack,
@@ -1152,11 +1152,12 @@ export function createTableScene(): TableSceneApi {
         const key = card.userData.cardKey as string | undefined
         if (room.phase === 'voting') {
           // Potential click-vote; becomes rearrange if moved past CLICK_MOVE_PX
+          if (!key) card.userData.cardKey = `loose:${card.userData.submissionPlayerId || 'x'}:${card.userData.index}`
           localDrag = {
             source: 'table',
             card,
             cardText: card.userData.cardText,
-            cardKey: key,
+            cardKey: card.userData.cardKey,
             pointerId: ev.pointerId,
             startX: ev.clientX,
             startY: ev.clientY,
@@ -1171,28 +1172,30 @@ export function createTableScene(): TableSceneApi {
           ev.preventDefault()
           return
         }
-        if (key) {
-          card.userData.dragging = true
-          localDrag = {
-            source: 'table',
-            card,
-            cardText: card.userData.cardText,
-            cardKey: key,
-            pointerId: ev.pointerId,
-            startX: ev.clientX,
-            startY: ev.clientY,
-            moved: false,
-            rotY: card.userData.baseRotY || 0,
-          }
-          try {
-            ;(ev.currentTarget as HTMLElement).setPointerCapture?.(ev.pointerId)
-          } catch {
-            /* ignore */
-          }
-          updateLocalDragPosition()
-          broadcastDrag(performance.now() + DRAG_BROADCAST_MS)
-          ev.preventDefault()
+        // Any table card is rearrangeable — invent a key if missing
+        if (!key) {
+          card.userData.cardKey = `loose:${card.userData.submissionPlayerId || 'x'}:${card.userData.index}:${card.userData.cardText}`
         }
+        card.userData.dragging = true
+        localDrag = {
+          source: 'table',
+          card,
+          cardText: card.userData.cardText,
+          cardKey: card.userData.cardKey,
+          pointerId: ev.pointerId,
+          startX: ev.clientX,
+          startY: ev.clientY,
+          moved: false,
+          rotY: card.userData.baseRotY || 0,
+        }
+        try {
+          ;(ev.currentTarget as HTMLElement).setPointerCapture?.(ev.pointerId)
+        } catch {
+          /* ignore */
+        }
+        updateLocalDragPosition()
+        broadcastDrag(performance.now() + DRAG_BROADCAST_MS)
+        ev.preventDefault()
       }
     }
   }
@@ -1390,8 +1393,8 @@ export function createTableScene(): TableSceneApi {
     if (handGroup) {
       const handOpacity = 1 - camBlend.value
       handGroup.visible = handOpacity > 0.08
-      handGroup.position.y = TABLE_Y + 0.05 - camBlend.value * 0.22
-      handGroup.position.z = 0.78 + camBlend.value * 0.28
+      handGroup.position.y = TABLE_Y + 0.1 - camBlend.value * 0.35
+      handGroup.position.z = 1.08 + camBlend.value * 0.35
     }
 
     const inHandZone = !lookClose && zoneFromPointer(pointerScreenY) === 'hand'
