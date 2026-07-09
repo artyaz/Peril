@@ -158,7 +158,15 @@
   </aside>
 
   {#if room?.phase === 'playing'}
-    <div class="hint">{room.czarId === session?.id ? 'Waiting for plays…' : 'Pull a card up to the table, then drop it'}</div>
+    <div class="hint">
+      {#if room.czarId === session?.id}
+        Waiting for plays…
+      {:else if (room.blackCard?.pick || 1) > 1}
+        Drop {(room.blackCard?.pick || 1)} cards onto the table
+      {:else}
+        Pull a card up to the table, then drop it
+      {/if}
+    </div>
   {/if}
 
   {#if room?.phase === 'voting'}

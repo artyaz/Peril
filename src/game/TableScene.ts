@@ -100,11 +100,14 @@ export function createTableScene(): TableSceneApi {
   let peerDragState: CardDrag | null = null
   let knownSubKeys = new Set<string>()
   let flyingKeys = new Set<string>()
+  /** Staged local drops before submitting (for pick > 1) */
+  let stagedPlays: { text: string; x: number; z: number; rotY: number; card: CardMesh }[] = []
 
   const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.34, 1.28)
   const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.04, 0.55)
-  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 0.95, 1.35)
-  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + 0.02, -0.55)
+  // Pull back + look down so far-rim peers and table cards stay in frame
+  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 1.05, 1.55)
+  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + 0.05, -0.75)
 
   function ensureHitbox(card: CardMesh) {
     if (card.getObjectByName('hitbox')) return
@@ -522,8 +525,9 @@ export function createTableScene(): TableSceneApi {
     const peerLayouts: SeatLayout[] = peers.map((_, i) => {
       const n = peers.length
       const t = n === 1 ? 0.5 : i / (n - 1)
-      const angle = -0.95 + t * 1.9
-      const dist = 1.28
+      // Far arc, seated ON the table rim so they stay in the tilted overview
+      const angle = -0.85 + t * 1.7
+      const dist = TABLE_RADIUS * 0.92
       return {
         position: new THREE.Vector3(Math.sin(angle) * dist, 0, -Math.cos(angle) * dist),
         yaw: Math.atan2(-Math.sin(angle), Math.cos(angle)),
@@ -544,7 +548,7 @@ export function createTableScene(): TableSceneApi {
       }
     }
 
-    const sitY = TABLE_Y - 0.08
+    const sitY = TABLE_Y + 0.05
     peers.forEach((p, i) => {
       const seat = peerLayouts[i]
       if (!seat) return
@@ -554,14 +558,14 @@ export function createTableScene(): TableSceneApi {
         handle = createAvatar(p.name, p.faceDataUrl)
         avatars.set(p.id, handle)
         worldGroup!.add(handle.group)
-        handle.group.position.set(seat.position.x, sitY - 0.35, seat.position.z)
+        handle.group.position.set(seat.position.x, sitY - 0.25, seat.position.z)
         handle.group.rotation.y = seat.yaw
         const target = handle
-        const fromY = sitY - 0.35
+        const fromY = sitY - 0.25
         tweens.tween(
           0.75,
           (v) => {
-            target.group.position.y = fromY + v * 0.35
+            target.group.position.y = fromY + v * 0.25
           },
           easeOutBack,
         )
@@ -577,7 +581,9 @@ export function createTableScene(): TableSceneApi {
 
       const hoverIdx = peerHover.get(p.id) ?? state.hover?.[p.id] ?? null
       const peekText = peerHoverText.get(p.id) ?? state.hoverText?.[p.id] ?? null
-      layoutPeerHand(handle, p.id, Math.min(p.handCount || 7, 7), hoverIdx, peekText)
+      // Always show a held fan so peers read as present even mid-round
+      const count = Math.max(1, Math.min(p.handCount ?? 7, 7))
+      layoutPeerHand(handle, p.id, count, hoverIdx, peekText)
     })
   }
 
@@ -1049,6 +1055,8 @@ export function createTableScene(): TableSceneApi {
     }
     const c = clampToTable(x, z)
     const rotY = localDrag.rotY
+    const pick = room?.blackCard?.pick || 1
+    const stageIndex = stagedPlays.length
 
     handGroup?.remove(card)
     if (card.parent !== tableGroup) tableGroup.add(card)
@@ -1061,7 +1069,7 @@ export function createTableScene(): TableSceneApi {
     card.rotation.z = 0
     card.userData.baseRotZ = 0
     card.scale.setScalar(0.78)
-    card.userData.cardKey = `local:${localId}:0:${text}`
+    card.userData.cardKey = `local:${localId}:${stageIndex}:${text}`
     card.userData.submissionPlayerId = localId
     card.userData.cardText = text
     card.userData.pinned = true
@@ -1071,9 +1079,17 @@ export function createTableScene(): TableSceneApi {
     handCards = handCards.filter((h) => h !== card)
     if (!tableCards.includes(card)) tableCards.push(card)
 
+    stagedPlays.push({ text, x: c.x, z: c.z, rotY, card })
     localDrag = null
     dragCb(null)
-    playCb([text], [{ x: c.x, z: c.z, rotY }])
+
+    // Only submit when we've staged the full pick count — avoids "Play exactly N" errors
+    if (stagedPlays.length >= pick) {
+      const cards = stagedPlays.map((s) => s.text)
+      const positions = stagedPlays.map((s) => ({ x: s.x, z: s.z, rotY: s.rotY }))
+      stagedPlays = []
+      playCb(cards, positions)
+    }
   }
 
   function endTableDrag() {
@@ -1311,8 +1327,17 @@ export function createTableScene(): TableSceneApi {
     syncAvatars(state, localPlayerId)
     syncBlack(state)
     syncSubmissions(state)
+    // Clear staging when our submission is confirmed or round changes
+    if (state.phase !== 'playing') {
+      stagedPlays = []
+    } else if (state.submissions?.some((s) => s.playerId === localPlayerId)) {
+      stagedPlays = []
+    }
     const rawHand = state.you?.hand || []
     const optimisticPlayed = new Map<string, number>()
+    for (const s of stagedPlays) {
+      optimisticPlayed.set(s.text, (optimisticPlayed.get(s.text) || 0) + 1)
+    }
     for (const c of tableCards) {
       if (
         c.userData.cardKey?.startsWith(`local:${localPlayerId}:`) ||
@@ -1419,7 +1444,7 @@ export function createTableScene(): TableSceneApi {
     }
 
     const t = clock.elapsedTime
-    const sitY = TABLE_Y - 0.08
+    const sitY = TABLE_Y + 0.05
     for (const [id, a] of avatars) {
       a.group.position.y = sitY + Math.sin(t * 1.1 + a.group.position.x * 2) * 0.008
       const hoverIdx = peerHover.get(id) ?? null
@@ -1428,8 +1453,9 @@ export function createTableScene(): TableSceneApi {
       const count = Math.max(
         cards?.length || 0,
         Math.min(room?.players.find((p) => p.id === id)?.handCount || 7, 7),
+        1,
       )
-      layoutPeerHand(a, id, Math.max(count, 1), hoverIdx, peekText)
+      layoutPeerHand(a, id, count, hoverIdx, peekText)
     }
 
     for (const [id, cards] of peerHands) {

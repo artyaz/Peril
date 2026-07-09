@@ -26,7 +26,8 @@ function makeNameSprite(name: string) {
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false })
   const sprite = new THREE.Sprite(mat)
   sprite.scale.set(0.85, 0.21, 1)
-  sprite.position.y = 1.85
+  sprite.position.y = 2.15
+  sprite.renderOrder = 3
   return sprite
 }
 
@@ -109,13 +110,14 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
   const silMat = new THREE.SpriteMaterial({
     map: silTex,
     transparent: true,
-    depthTest: true,
+    depthTest: false,
     depthWrite: false,
     sizeAttenuation: true,
   })
   const sil = new THREE.Sprite(silMat)
-  sil.scale.set(1.55, 1.95, 1)
-  sil.position.y = 1.2
+  sil.scale.set(1.85, 2.3, 1)
+  sil.position.y = 1.35
+  sil.renderOrder = 2
   group.add(sil)
 
   let nameSprite = makeNameSprite(name)
@@ -136,7 +138,7 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
 
   // Cards held at chest toward table (group yaw faces center)
   const handAnchor = new THREE.Group()
-  handAnchor.position.set(0, 1.05, 0.45)
+  handAnchor.position.set(0, 1.15, 0.5)
   handAnchor.rotation.x = -0.55
   group.add(handAnchor)
 
