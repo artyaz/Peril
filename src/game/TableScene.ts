@@ -19,18 +19,7 @@ export type TableSceneApi = {
 type SeatLayout = { position: THREE.Vector3; yaw: number }
 
 /** Raised table — seated height, not floor level */
-const TABLE_Y = 1.18
-
-function seatLayouts(maxPlayers: number): SeatLayout[] {
-  const dist = 2.05
-  const all = [
-    { position: new THREE.Vector3(0, 0, dist), yaw: Math.PI },
-    { position: new THREE.Vector3(0, 0, -dist), yaw: 0 },
-    { position: new THREE.Vector3(-dist, 0, 0), yaw: Math.PI / 2 },
-    { position: new THREE.Vector3(dist, 0, 0), yaw: -Math.PI / 2 },
-  ]
-  return all.slice(0, Math.max(2, Math.min(4, maxPlayers)))
-}
+const TABLE_Y = 1.35
 
 export function createTableScene(): TableSceneApi {
   let threeRenderer: THREE.WebGLRenderer | null = null
@@ -69,10 +58,11 @@ export function createTableScene(): TableSceneApi {
   let worldGroup: THREE.Group | null = null
 
   // Sitting at a raised table — bottom of screen = hand, top = overview
-  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.42, 1.18)
-  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.08, 0.42)
-  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 1.85, 1.55)
-  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + 0.02, -0.25)
+  // Pull back so a full hand fits; look slightly down at cards (not up from the floor)
+  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.55, 1.45)
+  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.05, 0.55)
+  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 2.15, 1.75)
+  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + 0.02, -0.2)
 
   function mount(el: HTMLElement) {
     root = el
@@ -246,23 +236,23 @@ export function createTableScene(): TableSceneApi {
     }
 
     const n = handCards.length
-    // Fit hand to viewport: tighter fan for smaller cards
-    const spread = Math.min(0.3, 1.55 / Math.max(n, 1))
+    // Fit hand to viewport: compact fan
+    const spread = Math.min(0.22, 1.35 / Math.max(n, 1))
     const start = -((n - 1) * spread) / 2
     handCards.forEach((card, i) => {
       const mid = (n - 1) / 2
       card.position.x = start + i * spread
-      card.position.z = 0.012 * Math.abs(i - mid)
+      card.position.z = 0.01 * Math.abs(i - mid)
       card.userData.baseY = 0
       // Face the player: readable text toward camera
-      card.userData.baseRotX = -0.12
-      card.userData.baseRotY = (i - mid) * -0.035
-      card.userData.baseRotZ = (i - mid) * -0.015
+      card.userData.baseRotX = -0.18
+      card.userData.baseRotY = (i - mid) * -0.03
+      card.userData.baseRotZ = (i - mid) * -0.012
       card.rotation.x = card.userData.baseRotX
       card.rotation.y = card.userData.baseRotY
       card.rotation.z = card.userData.baseRotZ
     })
-    handGroup.position.set(0, TABLE_Y + 0.06, 0.72)
+    handGroup.position.set(0, TABLE_Y + 0.02, 0.88)
   }
 
   function layoutPeerHand(
@@ -285,7 +275,7 @@ export function createTableScene(): TableSceneApi {
     }
     while (cards.length < handCount) {
       const card = createCard('Peril', 'back')
-      card.scale.setScalar(0.78)
+      card.scale.setScalar(0.9)
       const i = cards.length
       card.userData.index = i
       handle.handAnchor.add(card)
@@ -293,22 +283,21 @@ export function createTableScene(): TableSceneApi {
     }
 
     const n = cards.length
-    const spread = Math.min(0.13, 0.72 / Math.max(n, 1))
+    const spread = Math.min(0.1, 0.58 / Math.max(n, 1))
     const start = -((n - 1) * spread) / 2
     cards.forEach((card, i) => {
       const mid = (n - 1) / 2
       const isPeek = hoverIdx === i
-      // Fan held toward table; peek lifts + tips face toward local player (same feel as local hover)
+      // Fan held toward table; peek lifts + tips face toward local player
       card.position.x = start + i * spread
-      card.position.z = isPeek ? 0.16 : 0.03
-      card.userData.baseY = isPeek ? 0.2 : 0.03
-      card.userData.baseRotX = isPeek ? -0.55 : -1.15
-      card.userData.baseRotY = (i - mid) * 0.045
-      card.userData.baseRotZ = (i - mid) * 0.03
+      card.position.z = isPeek ? 0.14 : 0.025
+      card.userData.baseY = isPeek ? 0.16 : 0.02
+      card.userData.baseRotX = isPeek ? -0.5 : -1.2
+      card.userData.baseRotY = (i - mid) * 0.04
+      card.userData.baseRotZ = (i - mid) * 0.028
       if (hoverIdx != null && Math.abs(i - hoverIdx) === 1) {
-        card.position.x += (i < hoverIdx ? -1 : 1) * 0.05
+        card.position.x += (i < hoverIdx ? -1 : 1) * 0.04
       }
-      // Show peeked face when we know the text
       swapPeerCardFace(card, isPeek ? peekText : null, isPeek)
     })
   }
@@ -333,7 +322,19 @@ export function createTableScene(): TableSceneApi {
     const players = [...state.players].sort((a, b) => a.seat - b.seat)
     const local = players.find((p) => p.id === localPlayerId)
     const localSeat = local?.seat ?? 0
-    const layouts = seatLayouts(state.maxPlayers)
+    const peers = players.filter((p) => p.id !== localPlayerId)
+    // Place peers evenly around the far half of the table (always visible from local seat)
+    const peerLayouts: SeatLayout[] = peers.map((_, i) => {
+      const n = peers.length
+      const t = n === 1 ? 0.5 : i / (n - 1)
+      const angle = -Math.PI * 0.72 + t * Math.PI * 1.44 // ~west → north → east arc
+      const dist = 1.85
+      return {
+        position: new THREE.Vector3(Math.sin(angle) * dist, 0, -Math.cos(angle) * dist),
+        yaw: angle + Math.PI, // face table center
+      }
+    })
+    void localSeat
 
     const needed = new Set(players.map((p) => p.id))
     for (const [id, a] of avatars) {
@@ -349,30 +350,30 @@ export function createTableScene(): TableSceneApi {
       }
     }
 
-    for (const p of players) {
-      if (p.id === localPlayerId) continue
-      const rel = (p.seat - localSeat + state.maxPlayers) % state.maxPlayers
-      const seat = layouts[rel] || layouts[1]
-      if (!seat || rel === 0) continue
+    peers.forEach((p, i) => {
+      const seat = peerLayouts[i]
+      if (!seat) return
 
       let handle = avatars.get(p.id)
+      // Sit so XP silhouette chest meets the raised table rim
+      const sitY = TABLE_Y - 0.95
       if (!handle) {
         handle = createAvatar(p.name, p.faceDataUrl)
         avatars.set(p.id, handle)
-        worldGroup.add(handle.group)
-        // Sit at table height (avatar origin at ground; torso rises to table)
-        handle.group.position.set(seat.position.x, 0, seat.position.z)
+        worldGroup!.add(handle.group)
+        handle.group.position.set(seat.position.x, sitY - 0.4, seat.position.z)
         handle.group.rotation.y = seat.yaw
         const target = handle
-        const fromY = -0.35
+        const fromY = sitY - 0.4
         tweens.tween(0.75, (v) => {
-          target.group.position.y = fromY + v * 0.35
+          target.group.position.y = fromY + v * 0.4
         }, easeOutBack)
       } else {
         handle.setName(p.name)
         if (p.faceDataUrl) handle.setFace(p.faceDataUrl)
         handle.group.position.x = seat.position.x
         handle.group.position.z = seat.position.z
+        handle.group.position.y = sitY
         handle.group.rotation.y = seat.yaw
       }
       handle.setHighlight(state.czarId === p.id)
@@ -380,7 +381,7 @@ export function createTableScene(): TableSceneApi {
       const hoverIdx = peerHover.get(p.id) ?? state.hover?.[p.id] ?? null
       const peekText = peerHoverText.get(p.id) ?? state.hoverText?.[p.id] ?? null
       layoutPeerHand(handle, p.id, Math.min(p.handCount || 7, 7), hoverIdx, peekText)
-    }
+    })
   }
 
   function syncBlack(state: RoomState) {
@@ -404,9 +405,9 @@ export function createTableScene(): TableSceneApi {
       blackCard.userData.baseRotY = 0
       blackCard.userData.baseRotZ = 0
       blackCard.rotation.x = -Math.PI / 2
-      blackCard.position.set(0, 0.035, -0.42)
-      blackCard.userData.baseY = 0.035
-      blackCard.scale.setScalar(1.08)
+      blackCard.position.set(0, 0.03, -0.38)
+      blackCard.userData.baseY = 0.03
+      blackCard.scale.setScalar(1.15)
       tableGroup.add(blackCard)
       dropCard(blackCard, 0.8, 0.035)
       blackCard.userData.lift.velocity = -2.5
@@ -422,12 +423,12 @@ export function createTableScene(): TableSceneApi {
     clearTableCards()
 
     const n = subs.length
-    const scale = 0.62
+    const scale = 0.78
     subs.forEach((sub, i) => {
       // Arc in front of black card — leave the prompt clear
       const t = n === 1 ? 0.5 : i / (n - 1)
-      const x = (t - 0.5) * 1.55
-      const z = 0.42 + Math.abs(t - 0.5) * 0.12
+      const x = (t - 0.5) * 1.4
+      const z = 0.38 + Math.abs(t - 0.5) * 0.1
       sub.cards.forEach((text, ci) => {
         const card = createCard(sub.revealed ? text : 'Peril', sub.revealed ? 'white' : 'back')
         card.scale.setScalar(scale)
@@ -609,8 +610,8 @@ export function createTableScene(): TableSceneApi {
     if (handGroup) {
       const handOpacity = 1 - camBlend.value
       handGroup.visible = handOpacity > 0.08
-      handGroup.position.y = TABLE_Y + 0.06 - camBlend.value * 0.3
-      handGroup.position.z = 0.72 + camBlend.value * 0.4
+      handGroup.position.y = TABLE_Y + 0.02 - camBlend.value * 0.28
+      handGroup.position.z = 0.88 + camBlend.value * 0.35
     }
 
     const inHandZone = !lookClose && zoneFromPointer(pointerScreenY) === 'hand'
@@ -633,7 +634,8 @@ export function createTableScene(): TableSceneApi {
 
     const t = clock.elapsedTime
     for (const [id, a] of avatars) {
-      a.group.position.y = Math.sin(t * 1.1 + a.group.position.x * 2) * 0.008
+      const sitY = TABLE_Y - 0.95
+      a.group.position.y = sitY + Math.sin(t * 1.1 + a.group.position.x * 2) * 0.008
       const hoverIdx = peerHover.get(id) ?? null
       const peekText = peerHoverText.get(id) ?? null
       const cards = peerHands.get(id)

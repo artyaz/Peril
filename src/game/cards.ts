@@ -2,9 +2,9 @@ import * as THREE from 'three'
 import { Spring } from '../lib/motion'
 
 /** Compact cards so a full hand fits and table plays don't bury the black card. */
-export const CARD_W = 0.32
-export const CARD_H = 0.44
-export const CARD_D = 0.008
+export const CARD_W = 0.22
+export const CARD_H = 0.31
+export const CARD_D = 0.006
 
 const canvasCache = new Map<string, THREE.CanvasTexture>()
 
