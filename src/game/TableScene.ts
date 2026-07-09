@@ -48,20 +48,20 @@ type LocalDrag = {
 }
 
 const TABLE_Y = 1.55
-const TABLE_RADIUS = 0.48
-const HAND_ZONE_Y = 0.52
+const TABLE_RADIUS = 0.5
+const HAND_ZONE_Y = 0.55
 const DRAG_BROADCAST_MS = 40
 const CLICK_MOVE_PX = 6
-/** Feet Y so chest sits at the rim and head is clearly above the table. */
-const AVATAR_SIT_Y = TABLE_Y - 0.28
+/** Feet Y — heads clear the rim and sit in the upper third of the frame. */
+const AVATAR_SIT_Y = TABLE_Y - 0.22
 /** Spring feel for pointer-follow while dragging. */
 const DRAG_STIFF = 420
 const DRAG_DAMP = 34
-const HAND_GROUP_Y = TABLE_Y + 0.06
-const HAND_GROUP_Z = 0.62
-/** Wider base FOV; table peek only narrows slightly for readability. */
-const FOV_HAND = 56
-const FOV_TABLE = 44
+const HAND_GROUP_Y = TABLE_Y + 0.1
+const HAND_GROUP_Z = 0.7
+/** Wider FOV so the full hand + far seats fit. */
+const FOV_HAND = 62
+const FOV_TABLE = 48
 
 export function createTableScene(): TableSceneApi {
   let threeRenderer: THREE.WebGLRenderer | null = null
@@ -117,11 +117,11 @@ export function createTableScene(): TableSceneApi {
   /** Staged local drops before submitting (for pick > 1) */
   let stagedPlays: { text: string; x: number; z: number; rotY: number; card: CardMesh }[] = []
 
-  // Hand: pull back so the full fan fits; table: mild overhead, not glued to the surface.
-  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.42, 0.98)
-  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.08, 0.42)
-  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 0.72, 0.58)
-  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + TABLE_CARD_Y, -0.02)
+  // Hand: back far enough that card bottoms stay on-screen; table: roomy overhead.
+  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.55, 1.15)
+  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.12, 0.35)
+  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 1.05, 0.85)
+  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + TABLE_CARD_Y, -0.04)
 
   function ensureHitbox(card: CardMesh) {
     if (card.getObjectByName('hitbox')) return
@@ -456,18 +456,18 @@ export function createTableScene(): TableSceneApi {
     }
 
     const n = handCards.length
-    // Wider fan so all 7 cards stay in frame without heavy overlap
-    const spread = Math.min(0.118, 0.86 / Math.max(n, 1))
+    // Compact enough for 7, tall enough to read — keep bottoms above the bezel
+    const spread = Math.min(0.105, 0.78 / Math.max(n, 1))
     const start = -((n - 1) * spread) / 2
     handCards.forEach((card, i) => {
       if (card.userData.dragging) return
       const mid = (n - 1) / 2
       card.position.x = start + i * spread
-      card.position.z = 0.008 * Math.abs(i - mid)
-      card.userData.baseY = 0
-      card.userData.baseRotX = -0.28
-      card.userData.baseRotY = (i - mid) * -0.032
-      card.userData.baseRotZ = (i - mid) * -0.014
+      card.position.z = 0.01 * Math.abs(i - mid)
+      card.userData.baseY = 0.02
+      card.userData.baseRotX = -0.35
+      card.userData.baseRotY = (i - mid) * -0.028
+      card.userData.baseRotZ = (i - mid) * -0.012
       card.rotation.x = card.userData.baseRotX
       card.rotation.y = card.userData.baseRotY
       card.rotation.z = card.userData.baseRotZ
@@ -481,6 +481,7 @@ export function createTableScene(): TableSceneApi {
     handCount: number,
     hoverIdx: number | null,
     peekText: string | null,
+    faceLocalYaw = 0,
   ) {
     let cards = peerHands.get(playerId)
     if (!cards) {
@@ -495,26 +496,34 @@ export function createTableScene(): TableSceneApi {
     }
     while (cards.length < handCount) {
       const card = createCard('Peril', 'back')
-      card.scale.setScalar(0.78)
+      card.scale.setScalar(0.72)
       const i = cards.length
       card.userData.index = i
       handle.handAnchor.add(card)
       cards.push(card)
     }
 
+    // Face the local player so cards read upright (not edge-on from the side)
+    handle.handAnchor.position.set(0, 0.52, 0.18)
+    handle.handAnchor.rotation.set(-0.22, faceLocalYaw, 0)
+
     const n = cards.length
-    // Match local upright fan — held toward the table, not flat on it
-    const spread = Math.min(0.09, 0.58 / Math.max(n, 1))
+    const spread = Math.min(0.085, 0.55 / Math.max(n, 1))
     const start = -((n - 1) * spread) / 2
     cards.forEach((card, i) => {
       const mid = (n - 1) / 2
       const isPeek = hoverIdx === i
       card.position.x = start + i * spread
-      card.position.z = isPeek ? 0.04 : 0.01 * Math.abs(i - mid)
-      card.userData.baseY = isPeek ? 0.06 : 0
-      card.userData.baseRotX = isPeek ? -0.18 : -0.32
-      card.userData.baseRotY = (i - mid) * -0.03
-      card.userData.baseRotZ = (i - mid) * -0.012
+      card.position.y = isPeek ? 0.05 : 0
+      card.position.z = 0.008 * Math.abs(i - mid)
+      card.userData.baseY = isPeek ? 0.05 : 0
+      // Same upright fan language as the local hand
+      card.userData.baseRotX = isPeek ? -0.2 : -0.38
+      card.userData.baseRotY = (i - mid) * -0.028
+      card.userData.baseRotZ = (i - mid) * -0.01
+      card.rotation.x = card.userData.baseRotX
+      card.rotation.y = card.userData.baseRotY
+      card.rotation.z = card.userData.baseRotZ
       swapPeerCardFace(card, isPeek ? peekText : null, isPeek)
     })
   }
@@ -541,9 +550,9 @@ export function createTableScene(): TableSceneApi {
     const peerLayouts: SeatLayout[] = peers.map((_, i) => {
       const n = peers.length
       const t = n === 1 ? 0.5 : i / (n - 1)
-      // Wider arc across the far side so heads stay in both hand + table FOV
-      const angle = -1.15 + t * 2.3
-      const dist = TABLE_RADIUS + 0.22
+      // Far-side arc — heads stay above the table in both camera modes
+      const angle = -1.05 + t * 2.1
+      const dist = TABLE_RADIUS + 0.28
       return {
         position: new THREE.Vector3(Math.sin(angle) * dist, 0, -Math.cos(angle) * dist),
         yaw: Math.atan2(-Math.sin(angle), Math.cos(angle)),
@@ -598,9 +607,9 @@ export function createTableScene(): TableSceneApi {
 
       const hoverIdx = peerHover.get(p.id) ?? state.hover?.[p.id] ?? null
       const peekText = peerHoverText.get(p.id) ?? state.hoverText?.[p.id] ?? null
-      // Always show a held fan so peers read as present even mid-round
       const count = Math.max(1, Math.min(p.handCount ?? 7, 7))
-      layoutPeerHand(handle, p.id, count, hoverIdx, peekText)
+      // Cancel seat yaw so the fan faces the local camera (+Z), not the table center
+      layoutPeerHand(handle, p.id, count, hoverIdx, peekText, -seat.yaw)
     })
   }
 
@@ -1498,8 +1507,9 @@ export function createTableScene(): TableSceneApi {
     if (handGroup) {
       const handOpacity = 1 - camBlend.value
       handGroup.visible = handOpacity > 0.08
-      handGroup.position.y = HAND_GROUP_Y - camBlend.value * 0.12
-      handGroup.position.z = HAND_GROUP_Z + camBlend.value * 0.18
+      // Ease the fan down/out when looking at the table so it doesn't clip the rim
+      handGroup.position.y = HAND_GROUP_Y - camBlend.value * 0.08
+      handGroup.position.z = HAND_GROUP_Z + camBlend.value * 0.1
     }
 
     const inHandZone = !lookClose && zoneFromPointer(pointerScreenY) === 'hand'
@@ -1541,7 +1551,8 @@ export function createTableScene(): TableSceneApi {
         Math.min(room?.players.find((p) => p.id === id)?.handCount || 7, 7),
         1,
       )
-      layoutPeerHand(a, id, count, hoverIdx, peekText)
+      // Keep fan facing the local camera regardless of seat yaw
+      layoutPeerHand(a, id, count, hoverIdx, peekText, -a.group.rotation.y)
     }
 
     for (const [id, cards] of peerHands) {

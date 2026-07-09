@@ -12,36 +12,38 @@ export type AvatarHandle = {
 
 function makeNameSprite(name: string) {
   const c = document.createElement('canvas')
-  c.width = 640
-  c.height = 160
+  c.width = 768
+  c.height = 192
   const ctx = c.getContext('2d')!
   ctx.clearRect(0, 0, c.width, c.height)
-  // Soft pill so names read against the pale room
   const label = name.length > 14 ? `${name.slice(0, 13)}…` : name
-  ctx.font = '700 52px "DM Sans", system-ui, sans-serif'
-  const tw = Math.min(ctx.measureText(label).width + 64, c.width - 24)
-  const th = 72
+  ctx.font = '700 64px "DM Sans", system-ui, sans-serif'
+  const tw = Math.min(Math.max(ctx.measureText(label).width + 80, 220), c.width - 32)
+  const th = 88
   const x = (c.width - tw) / 2
   const y = (c.height - th) / 2
-  ctx.fillStyle = 'rgba(250,250,248,0.88)'
-  roundPill(ctx, x, y, tw, th, 36)
+  ctx.fillStyle = 'rgba(42,42,40,0.78)'
+  roundPill(ctx, x, y, tw, th, 44)
   ctx.fill()
-  ctx.fillStyle = '#2a2a28'
+  ctx.fillStyle = '#fafaf8'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   ctx.fillText(label, c.width / 2, c.height / 2 + 2)
   const tex = new THREE.CanvasTexture(c)
   tex.colorSpace = THREE.SRGBColorSpace
+  tex.needsUpdate = true
   const mat = new THREE.SpriteMaterial({
     map: tex,
     transparent: true,
     depthTest: false,
     depthWrite: false,
+    sizeAttenuation: true,
   })
   const sprite = new THREE.Sprite(mat)
-  sprite.scale.set(0.62, 0.155, 1)
-  sprite.position.y = 1.08
-  sprite.renderOrder = 10
+  sprite.scale.set(0.72, 0.18, 1)
+  sprite.position.y = 1.02
+  sprite.center.set(0.5, 0.5)
+  sprite.renderOrder = 20
   return sprite
 }
 
@@ -62,7 +64,7 @@ function roundPill(
   ctx.closePath()
 }
 
-/** Compact XP pear silhouette as a real lathed mesh (depth-tested, not a billboard). */
+/** Compact XP pear torso as a lathed mesh — head is a separate sphere. */
 function xpBodyGeometry() {
   const pts = [
     new THREE.Vector2(0.0, 0.0),
@@ -73,14 +75,9 @@ function xpBodyGeometry() {
     new THREE.Vector2(0.28, 0.28),
     new THREE.Vector2(0.25, 0.36),
     new THREE.Vector2(0.18, 0.42),
-    new THREE.Vector2(0.1, 0.46),
-    new THREE.Vector2(0.07, 0.5), // neck
-    new THREE.Vector2(0.09, 0.55),
-    new THREE.Vector2(0.14, 0.62),
-    new THREE.Vector2(0.155, 0.7),
-    new THREE.Vector2(0.14, 0.78),
-    new THREE.Vector2(0.08, 0.84),
-    new THREE.Vector2(0.0, 0.86),
+    new THREE.Vector2(0.11, 0.46),
+    new THREE.Vector2(0.07, 0.5), // neck stump
+    new THREE.Vector2(0.0, 0.52),
   ]
   const geo = new THREE.LatheGeometry(pts, 40)
   const pos = geo.attributes.position
@@ -89,7 +86,7 @@ function xpBodyGeometry() {
   for (let i = 0; i < pos.count; i++) {
     const y = pos.getY(i)
     const fade = THREE.MathUtils.smoothstep(y, 0.01, 0.22)
-    const shade = 0.7 + fade * 0.22
+    const shade = 0.72 + fade * 0.2
     colors[i * 3] = shade
     colors[i * 3 + 1] = shade
     colors[i * 3 + 2] = shade * 0.98
@@ -130,30 +127,30 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
   }
 
   const body = new THREE.Mesh(xpBodyGeometry(), bodyMat)
-  body.scale.set(0.95, 0.95, 0.68)
+  body.scale.set(1.05, 1.05, 0.72)
   body.castShadow = true
   group.add(body)
 
   const headMat = new THREE.MeshStandardMaterial({
-    color: '#aeaea9',
-    roughness: 0.82,
+    color: '#b0b0aa',
+    roughness: 0.75,
     metalness: 0,
   })
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.165, 28, 22), headMat)
-  head.position.y = 0.74
-  head.scale.set(1, 1.02, 0.88)
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.19, 32, 24), headMat)
+  head.position.y = 0.72
+  head.scale.set(1, 1.06, 0.92)
   head.castShadow = true
   group.add(head)
 
   // Front-only face photo on a shallow sphere patch
   const faceGeo = new THREE.SphereGeometry(
-    0.168,
+    0.193,
     24,
     18,
     Math.PI * 0.22,
     Math.PI * 0.56,
-    0.4,
-    Math.PI * 0.5,
+    0.35,
+    Math.PI * 0.55,
   )
   const faceMat = new THREE.MeshStandardMaterial({
     color: '#d8d8d4',
@@ -168,10 +165,11 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
   group.add(face)
 
   let nameSprite = makeNameSprite(name)
+  nameSprite.position.y = 1.05
   group.add(nameSprite)
 
   const ring = new THREE.Mesh(
-    new THREE.RingGeometry(0.2, 0.26, 28),
+    new THREE.RingGeometry(0.22, 0.28, 28),
     new THREE.MeshBasicMaterial({
       color: '#9a9a94',
       transparent: true,
@@ -185,9 +183,8 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
   group.add(ring)
 
   const handAnchor = new THREE.Group()
-  // Hold cards upright in front of the chest, facing the local player
-  handAnchor.position.set(0, 0.48, 0.28)
-  handAnchor.rotation.x = -0.12
+  handAnchor.position.set(0, 0.48, 0.2)
+  handAnchor.rotation.x = -0.22
   group.add(handAnchor)
 
   let faceTex: THREE.Texture | null = null
