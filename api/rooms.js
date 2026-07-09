@@ -110,6 +110,10 @@ export default async function handler(req, res) {
       const code = String(body.code || body.roomCode || '').toUpperCase()
       const room = await loadRoom(code)
       if (!room) return send(res, 404, { error: 'Room not found' })
+      // Advance bot plays/votes between polls (staggered) so humans see feedback first
+      const before = room.updatedAt
+      applyAction(room, { type: 'tick_bots', playerId: String(body.playerId || '') })
+      if (room.updatedAt !== before) await saveRoom(room)
       return send(res, 200, {
         state: stateFor(room, String(body.playerId || '')),
         meta: publicMeta(room),

@@ -100,7 +100,7 @@ export function connectRoom(opts: {
   function send(msg: ClientMsg) {
     if (closed || msg.type === 'hello') return
     void (async () => {
-      try {
+      const attempt = async () => {
         const res = await fetch('/api/rooms', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -117,7 +117,22 @@ export function connectRoom(opts: {
           lastUpdated = data.state.updatedAt || Date.now()
           opts.onMessage({ type: 'state', state: data.state as RoomState })
         }
+        return data
+      }
+      try {
+        await attempt()
       } catch (e) {
+        // One retry for flaky next_round / vote on cold starts
+        if (msg.type === 'next_round' || msg.type === 'vote' || msg.type === 'play_cards') {
+          try {
+            await new Promise((r) => setTimeout(r, 200))
+            await attempt()
+            return
+          } catch (e2) {
+            opts.onError?.(e2 instanceof Error ? e2.message : 'Action failed')
+            return
+          }
+        }
         opts.onError?.(e instanceof Error ? e.message : 'Action failed')
       }
     })()

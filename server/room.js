@@ -321,6 +321,7 @@ class Room {
       }
     }
     if (this.phase === 'voting') {
+      // Stagger: one bot vote per tick so humans see confirmation
       for (const p of this.players.values()) {
         if (!p.isBot) continue
         if (this.votes[p.id]) continue
@@ -328,6 +329,7 @@ class Room {
         if (!options.length) continue
         const choice = options[Math.floor(Math.random() * options.length)]
         try { this.vote(p.id, choice) } catch { /* ignore */ }
+        break
       }
     }
   }
@@ -493,7 +495,8 @@ class Room {
   }
 
   nextRound() {
-    if (this.phase !== 'scoring') return
+    // Allow advancing from scoring (or stuck revealing) so the button always works
+    if (this.phase !== 'scoring' && this.phase !== 'revealing') return
     const scores = [...this.players.values()].map((p) => p.score)
     if (Math.max(...scores, 0) >= 5) {
       this.phase = 'ended'
@@ -643,11 +646,13 @@ function attachClient(ws, ip) {
         }
         case 'vote':
           room.vote(playerId, msg.submissionPlayerId)
-          setTimeout(() => room.runBots(), 400)
+          // Delay bots so the voter sees green confirmation first
+          setTimeout(() => room.runBots(), 1200)
+          setTimeout(() => room.runBots(), 2000)
           break
         case 'czar_pick':
           room.czarPick(playerId, msg.submissionPlayerId)
-          setTimeout(() => room.runBots(), 400)
+          setTimeout(() => room.runBots(), 1200)
           break
         case 'add_bot':
           if (playerId !== room.hostId) throw new Error('Only host')

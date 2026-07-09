@@ -3,6 +3,7 @@ import {
   createCard,
   updateCardMotion,
   dropCard,
+  setCardFace,
   CARD_W,
   CARD_H,
   TABLE_CARD_Y,
@@ -19,6 +20,8 @@ export type TableSceneApi = {
   setState: (state: RoomState, localPlayerId: string) => void
   setPeerHover: (playerId: string, cardIndex: number | null, cardText?: string | null) => void
   setPeerDrag: (drag: CardDrag | null) => void
+  /** Put staged/pending plays back into the hand after a rejected play */
+  revertStagedPlays: () => void
   onPlayCards: (cards: string[], positions: { x: number; z: number; rotY?: number }[]) => void
   onHoverCard: (index: number | null, text?: string | null) => void
   onDragCard: (drag: CardDrag | null) => void
@@ -45,20 +48,31 @@ type LocalDrag = {
   followX: Spring
   followY: Spring
   followZ: Spring
+  /** Hand reorder: last slot we snapped into */
+  reorderSlot?: number
+  /** Whether dropping on the table may submit a play */
+  canPlay?: boolean
 }
 
 const TABLE_Y = 1.55
-const TABLE_RADIUS = 0.42
-const HAND_ZONE_Y = 0.48
+const TABLE_RADIUS = 0.52
+const HAND_ZONE_Y = 0.56
 const DRAG_BROADCAST_MS = 40
 const CLICK_MOVE_PX = 6
-/** Feet Y so chest sits at the rim and head is clearly above the table. */
-const AVATAR_SIT_Y = TABLE_Y - 0.36
-/** Spring feel for pointer-follow while dragging. */
+/** Feet Y — keep heads + name pills inside the upper frame. */
+const AVATAR_SIT_Y = TABLE_Y - 0.55
 const DRAG_STIFF = 420
 const DRAG_DAMP = 34
-const HAND_GROUP_Y = TABLE_Y + 0.08
-const HAND_GROUP_Z = 0.55
+/** Local hand in camera space — slightly closer than before. */
+const HAND_CAM_X = 0
+const HAND_CAM_Y = -0.16
+const HAND_CAM_Z = -0.44
+/** Middleground FOV: roomy hand, tighter peek for readable table text. */
+const FOV_HAND = 64
+const FOV_TABLE = 38
+/** Soft collision radius on the table (half-width-ish). */
+const CARD_COLLIDE_R = CARD_W * 0.72
+const CARD_COLLIDE_ITERS = 4
 
 export function createTableScene(): TableSceneApi {
   let threeRenderer: THREE.WebGLRenderer | null = null
@@ -79,6 +93,7 @@ export function createTableScene(): TableSceneApi {
   let localId = ''
   let room: RoomState | null = null
   let hoveredIndex: number | null = null
+  let hoveredTableCard: CardMesh | null = null
   let selected = new Set<string>()
   let peerHover = new Map<string, number | null>()
   let lookClose = false
@@ -100,31 +115,41 @@ export function createTableScene(): TableSceneApi {
     new THREE.Vector3(0, 1, 0),
     -(TABLE_Y + TABLE_CARD_Y + 0.01),
   )
-  const handPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -HAND_GROUP_Y)
+  const handPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0)
   const hitPoint = new THREE.Vector3()
   let tableGroup: THREE.Group | null = null
   let handGroup: THREE.Group | null = null
   let worldGroup: THREE.Group | null = null
+  const _handPlanePoint = new THREE.Vector3()
+  const _handPlaneNormal = new THREE.Vector3()
 
   let localDrag: LocalDrag | null = null
   let lastDragBroadcast = 0
   let peerDragState: CardDrag | null = null
   let knownSubKeys = new Set<string>()
   let flyingKeys = new Set<string>()
-  /** Staged local drops before submitting (for pick > 1) */
+  /** Staged local drops before submitting (for pick > 1) — kept until server confirms */
   let stagedPlays: { text: string; x: number; z: number; rotY: number; card: CardMesh }[] = []
+  /** True after we've sent play_cards and are waiting for the server submission */
+  let playSubmitPending = false
+  /** Optimistic local vote target while waiting for server ack */
+  let localVoteId: string | null = null
 
-  // Hand: camera looks at the fan in the lower viewport.
-  // Table peek: close overhead so card text is readable.
-  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.32, 0.78)
-  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.1, 0.48)
-  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 0.28, 0.26)
+  // Hand overview stays roomy; table peek drops in close enough to read card text.
+  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.62, 1.28)
+  const handCamTarget = new THREE.Vector3(0, TABLE_Y - 0.02, 0.08)
+  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 0.55, 0.48)
   const tableCamTarget = new THREE.Vector3(0, TABLE_Y + TABLE_CARD_Y, 0.02)
 
   function ensureHitbox(card: CardMesh) {
-    if (card.getObjectByName('hitbox')) return
-    const hit = new THREE.Mesh(
-      new THREE.BoxGeometry(CARD_W * 1.25, CARD_H * 1.25, 0.02),
+    let hit = card.getObjectByName('hitbox') as THREE.Mesh | undefined
+    if (hit) {
+      // Keep hitbox generous for reliable picks
+      hit.scale.set(1, 1, 1)
+      return
+    }
+    hit = new THREE.Mesh(
+      new THREE.BoxGeometry(CARD_W * 1.45, CARD_H * 1.4, 0.04),
       new THREE.MeshBasicMaterial({
         transparent: true,
         opacity: 0,
@@ -132,6 +157,7 @@ export function createTableScene(): TableSceneApi {
       }),
     )
     hit.name = 'hitbox'
+    hit.raycast = THREE.Mesh.prototype.raycast
     card.add(hit)
   }
 
@@ -159,9 +185,10 @@ export function createTableScene(): TableSceneApi {
     scene.background = new THREE.Color('#e6e6e2')
     scene.fog = new THREE.Fog('#e6e6e2', 10, 32)
 
-    camera = new THREE.PerspectiveCamera(48, 1, 0.05, 60)
+    camera = new THREE.PerspectiveCamera(FOV_HAND, 1, 0.05, 60)
     camera.position.copy(handCamPos)
     camera.lookAt(handCamTarget)
+    scene.add(camera)
 
     threeRenderer = new THREE.WebGLRenderer({
       antialias: true,
@@ -260,8 +287,10 @@ export function createTableScene(): TableSceneApi {
     scene.add(fill)
 
     handGroup = new THREE.Group()
-    handGroup.position.set(0, HAND_GROUP_Y, HAND_GROUP_Z)
-    scene.add(handGroup)
+    // Parent to camera so the fan always sits in the lower viewport
+    camera.add(handGroup)
+    handGroup.position.set(HAND_CAM_X, HAND_CAM_Y, HAND_CAM_Z)
+    handGroup.rotation.x = 0.08
 
     const canvas = threeRenderer.domElement
     canvas.style.display = 'block'
@@ -396,26 +425,98 @@ export function createTableScene(): TableSceneApi {
     return { x: x * s, z: z * s }
   }
 
+  function handSlotLayout(n: number, i: number) {
+    const spread = Math.min(0.095, 0.7 / Math.max(n, 1))
+    const start = -((n - 1) * spread) / 2
+    const mid = (n - 1) / 2
+    return {
+      x: start + i * spread,
+      z: 0.006 * Math.abs(i - mid),
+      baseRotX: -0.06,
+      baseRotY: (i - mid) * -0.028,
+      baseRotZ: (i - mid) * -0.012,
+      spread,
+      start,
+    }
+  }
+
+  function applyHandSlotTargets(animate = true) {
+    const n = handCards.length
+    handCards.forEach((card, i) => {
+      if (card.userData.dragging) return
+      const slot = handSlotLayout(n, i)
+      card.userData.index = i
+      card.userData.baseY = 0
+      card.userData.baseRotX = slot.baseRotX
+      card.userData.baseRotY = slot.baseRotY
+      card.userData.baseRotZ = slot.baseRotZ
+      if (!card.userData.posX) {
+        card.userData.posX = new Spring(card.position.x, 280, 26)
+        card.userData.posZ = new Spring(card.position.z, 280, 26)
+      }
+      card.userData.posX.center = slot.x
+      card.userData.posZ.center = slot.z
+      if (!animate) {
+        card.userData.posX.set(slot.x)
+        card.userData.posZ.set(slot.z)
+        card.position.x = slot.x
+        card.position.z = slot.z
+        card.rotation.x = slot.baseRotX
+        card.rotation.y = slot.baseRotY
+        card.rotation.z = slot.baseRotZ
+      }
+    })
+  }
+
+  function reorderHandToSlot(fromIndex: number, toIndex: number) {
+    if (fromIndex === toIndex) return
+    if (fromIndex < 0 || toIndex < 0 || fromIndex >= handCards.length || toIndex >= handCards.length)
+      return
+    const [card] = handCards.splice(fromIndex, 1)
+    handCards.splice(toIndex, 0, card)
+    handCards.forEach((c, i) => {
+      c.userData.index = i
+    })
+    if (localDrag?.source === 'hand') {
+      localDrag.handIndex = toIndex
+      localDrag.reorderSlot = toIndex
+    }
+    applyHandSlotTargets(true)
+  }
+
   function layoutHand(texts: string[]) {
     if (!handGroup) return
-    const dragCard =
-      localDrag?.source === 'hand' ? localDrag.card : null
-    const byText = new Map<string, CardMesh[]>()
-    for (const c of handCards) {
-      const t = c.userData.cardText
-      const list = byText.get(t) || []
-      list.push(c)
-      byText.set(t, list)
+    const dragCard = localDrag?.source === 'hand' ? localDrag.card : null
+
+    // If the multiset of texts matches our current hand, keep local reorder
+    const sortedNeed = [...texts].sort()
+    const sortedHave = handCards
+      .filter((c) => !c.userData.dragging || c === dragCard)
+      .map((c) => c.userData.cardText)
+      .sort()
+    const sameMultiset =
+      sortedNeed.length === sortedHave.length &&
+      sortedNeed.every((t, i) => t === sortedHave[i])
+
+    let orderTexts = texts
+    if (sameMultiset && handCards.length === texts.length) {
+      orderTexts = handCards.map((c) => c.userData.cardText)
     }
 
+    const pool = [...handCards]
     const next: CardMesh[] = []
     const reused = new Set<CardMesh>()
-    texts.forEach((t, i) => {
-      const pool = byText.get(t)
-      let card = pool?.shift()
-      if (card && card === dragCard && !texts.includes(t)) {
-        card = undefined
+
+    const takeMatch = (text: string) => {
+      if (dragCard && dragCard.userData.cardText === text && !reused.has(dragCard)) {
+        return dragCard
       }
+      const idx = pool.findIndex((c) => !reused.has(c) && c.userData.cardText === text)
+      return idx >= 0 ? pool[idx] : undefined
+    }
+
+    orderTexts.forEach((t, i) => {
+      let card = takeMatch(t)
       if (card) {
         reused.add(card)
         card.userData.index = i
@@ -423,6 +524,10 @@ export function createTableScene(): TableSceneApi {
           handGroup!.add(card)
         }
         ensureHitbox(card)
+        if (!card.userData.posX) {
+          card.userData.posX = new Spring(card.position.x, 280, 26)
+          card.userData.posZ = new Spring(card.position.z, 280, 26)
+        }
         next.push(card)
       } else {
         card = createCard(t, 'white')
@@ -437,7 +542,7 @@ export function createTableScene(): TableSceneApi {
     })
 
     for (const c of handCards) {
-      if (reused.has(c) || c === dragCard) continue
+      if (reused.has(c)) continue
       if (c.parent === handGroup) handGroup.remove(c)
       disposeCardMesh(c)
     }
@@ -445,7 +550,9 @@ export function createTableScene(): TableSceneApi {
     handCards = next
 
     if (localDrag?.source === 'hand') {
-      const match = handCards.find((c) => c.userData.cardText === localDrag!.cardText)
+      const match =
+        handCards.find((c) => c === localDrag!.card) ||
+        handCards.find((c) => c.userData.cardText === localDrag!.cardText)
       if (match) {
         localDrag.card = match
         localDrag.handIndex = match.userData.index
@@ -453,24 +560,69 @@ export function createTableScene(): TableSceneApi {
       }
     }
 
-    const n = handCards.length
-    // Readable fan with comfortable hitboxes
-    const spread = Math.min(0.095, 0.72 / Math.max(n, 1))
-    const start = -((n - 1) * spread) / 2
-    handCards.forEach((card, i) => {
-      if (card.userData.dragging) return
-      const mid = (n - 1) / 2
-      card.position.x = start + i * spread
-      card.position.z = 0.006 * Math.abs(i - mid)
-      card.userData.baseY = 0
-      card.userData.baseRotX = -0.22
-      card.userData.baseRotY = (i - mid) * -0.028
-      card.userData.baseRotZ = (i - mid) * -0.012
-      card.rotation.x = card.userData.baseRotX
-      card.rotation.y = card.userData.baseRotY
-      card.rotation.z = card.userData.baseRotZ
-    })
-    handGroup.position.set(0, HAND_GROUP_Y, HAND_GROUP_Z)
+    applyHandSlotTargets(!dragCard)
+    handGroup.position.set(HAND_CAM_X, HAND_CAM_Y, HAND_CAM_Z)
+  }
+
+  function separateTableCards(exclude?: CardMesh | null) {
+    for (let iter = 0; iter < CARD_COLLIDE_ITERS; iter++) {
+      for (let i = 0; i < tableCards.length; i++) {
+        const a = tableCards[i]
+        if (a === exclude || a.userData.dragging) continue
+        for (let j = i + 1; j < tableCards.length; j++) {
+          const b = tableCards[j]
+          if (b === exclude || b.userData.dragging) continue
+          const dx = b.position.x - a.position.x
+          const dz = b.position.z - a.position.z
+          const dist = Math.hypot(dx, dz) || 0.0001
+          const min = CARD_COLLIDE_R * (a.scale.x + b.scale.x)
+          if (dist >= min) continue
+          const push = (min - dist) * 0.5
+          const nx = dx / dist
+          const nz = dz / dist
+          // Prefer moving the unpinned / newer card
+          const moveA = !a.userData.pinned || !!b.userData.pinned
+          const moveB = !b.userData.pinned || !!a.userData.pinned
+          const share = moveA && moveB ? 0.5 : 1
+          if (moveA) {
+            a.position.x -= nx * push * share
+            a.position.z -= nz * push * share
+            const c = clampToTable(a.position.x, a.position.z)
+            a.position.x = c.x
+            a.position.z = c.z
+          }
+          if (moveB) {
+            b.position.x += nx * push * share
+            b.position.z += nz * push * share
+            const c = clampToTable(b.position.x, b.position.z)
+            b.position.x = c.x
+            b.position.z = c.z
+          }
+        }
+      }
+    }
+  }
+
+  function resolveDropAgainstTable(card: CardMesh, x: number, z: number) {
+    let cx = x
+    let cz = z
+    for (let iter = 0; iter < CARD_COLLIDE_ITERS; iter++) {
+      for (const other of tableCards) {
+        if (other === card || other.userData.dragging) continue
+        const dx = cx - other.position.x
+        const dz = cz - other.position.z
+        const dist = Math.hypot(dx, dz) || 0.0001
+        const min = CARD_COLLIDE_R * (card.scale.x + other.scale.x)
+        if (dist >= min) continue
+        const push = (min - dist) * 1.05
+        cx += (dx / dist) * push
+        cz += (dz / dist) * push
+      }
+      const c = clampToTable(cx, cz)
+      cx = c.x
+      cz = c.z
+    }
+    return { x: cx, z: cz }
   }
 
   function layoutPeerHand(
@@ -493,25 +645,44 @@ export function createTableScene(): TableSceneApi {
     }
     while (cards.length < handCount) {
       const card = createCard('Peril', 'back')
-      card.scale.setScalar(0.62)
+      card.scale.setScalar(0.95)
       const i = cards.length
       card.userData.index = i
       handle.handAnchor.add(card)
       cards.push(card)
     }
 
+    // Yaw toward camera only — keep world-up so cards stay portrait like the local hand.
+    // Full lookAt tilts them flat from our elevated seat and reads as "horizontal".
+    handle.handAnchor.position.set(0, 0.34, 0.3)
+    let faceYaw = 0
+    if (camera) {
+      const anchorWorld = new THREE.Vector3()
+      handle.group.localToWorld(anchorWorld.copy(handle.handAnchor.position))
+      const dx = camera.position.x - anchorWorld.x
+      const dz = camera.position.z - anchorWorld.z
+      faceYaw = Math.atan2(dx, dz) - handle.group.rotation.y
+    }
+    // Strong lean toward the local seat so cards read tall like your hand
+    handle.handAnchor.rotation.set(-0.55, faceYaw, 0)
+
     const n = cards.length
-    const spread = Math.min(0.072, 0.42 / Math.max(n, 1))
+    const spread = Math.min(0.095, 0.62 / Math.max(n, 1))
     const start = -((n - 1) * spread) / 2
     cards.forEach((card, i) => {
       const mid = (n - 1) / 2
       const isPeek = hoverIdx === i
       card.position.x = start + i * spread
-      card.position.z = isPeek ? 0.08 : 0.02
-      card.userData.baseY = isPeek ? 0.1 : 0.02
-      card.userData.baseRotX = isPeek ? -0.95 : -1.15
-      card.userData.baseRotY = (i - mid) * 0.035
-      card.userData.baseRotZ = (i - mid) * 0.022
+      card.position.y = isPeek ? 0.045 : 0
+      card.position.z = 0.01 * Math.abs(i - mid)
+      card.userData.baseY = isPeek ? 0.045 : 0
+      card.userData.baseRotX = isPeek ? -0.02 : -0.06
+      card.userData.baseRotY = (i - mid) * -0.032
+      card.userData.baseRotZ = (i - mid) * -0.016
+      card.rotation.x = card.userData.baseRotX
+      card.rotation.y = card.userData.baseRotY
+      card.rotation.z = card.userData.baseRotZ
+      if (Math.abs(card.scale.x - 0.95) > 0.01) card.scale.setScalar(0.95)
       swapPeerCardFace(card, isPeek ? peekText : null, isPeek)
     })
   }
@@ -519,16 +690,7 @@ export function createTableScene(): TableSceneApi {
   function swapPeerCardFace(card: CardMesh, text: string | null, isPeek: boolean) {
     const wantKind: 'white' | 'back' = isPeek && text ? 'white' : 'back'
     const wantText = isPeek && text ? text : 'Peril'
-    if (card.userData.kind === wantKind && card.userData.cardText === wantText) return
-
-    const fresh = createCard(wantText, wantKind)
-    const oldMats = card.material as THREE.MeshStandardMaterial[]
-    const newMats = fresh.material as THREE.MeshStandardMaterial[]
-    for (let i = 0; i < oldMats.length; i++) oldMats[i].dispose()
-    card.material = newMats
-    card.userData.kind = wantKind
-    card.userData.cardText = wantText
-    fresh.geometry.dispose()
+    setCardFace(card, wantText, wantKind)
   }
 
   function syncAvatars(state: RoomState, localPlayerId: string) {
@@ -538,9 +700,9 @@ export function createTableScene(): TableSceneApi {
     const peerLayouts: SeatLayout[] = peers.map((_, i) => {
       const n = peers.length
       const t = n === 1 ? 0.5 : i / (n - 1)
-      // Tight arc just outside the rim — seated at the table
+      // Far-side arc — heads stay above the table in both camera modes
       const angle = -0.95 + t * 1.9
-      const dist = TABLE_RADIUS + 0.12
+      const dist = TABLE_RADIUS + 0.32
       return {
         position: new THREE.Vector3(Math.sin(angle) * dist, 0, -Math.cos(angle) * dist),
         yaw: Math.atan2(-Math.sin(angle), Math.cos(angle)),
@@ -595,7 +757,6 @@ export function createTableScene(): TableSceneApi {
 
       const hoverIdx = peerHover.get(p.id) ?? state.hover?.[p.id] ?? null
       const peekText = peerHoverText.get(p.id) ?? state.hoverText?.[p.id] ?? null
-      // Always show a held fan so peers read as present even mid-round
       const count = Math.max(1, Math.min(p.handCount ?? 7, 7))
       layoutPeerHand(handle, p.id, count, hoverIdx, peekText)
     })
@@ -622,9 +783,9 @@ export function createTableScene(): TableSceneApi {
       blackCard.userData.baseRotY = 0
       blackCard.userData.baseRotZ = 0
       blackCard.rotation.x = TABLE_FACE_UP_X
-      blackCard.position.set(0, TABLE_CARD_Y, -0.06)
+      blackCard.position.set(0, TABLE_CARD_Y, -0.1)
       blackCard.userData.baseY = TABLE_CARD_Y
-      blackCard.scale.setScalar(0.95)
+      blackCard.scale.setScalar(1)
       tableGroup.add(blackCard)
       dropCard(blackCard, 0.8, TABLE_CARD_Y)
       blackCard.userData.lift.velocity = -2.5
@@ -689,8 +850,8 @@ export function createTableScene(): TableSceneApi {
     subs.forEach((sub, i) => {
       const n = subs.length
       const t = n === 1 ? 0.5 : i / (n - 1)
-      const arcX = (t - 0.5) * 0.28
-      const arcZ = 0.06
+      const arcX = (t - 0.5) * 0.34
+      const arcZ = 0.08
       sub.cards.forEach((text, ci) => {
         const key = cardKeyFor(sub.playerId, ci, text)
         nextKeys.add(key)
@@ -698,7 +859,7 @@ export function createTableScene(): TableSceneApi {
         const hasServerPos = !!pos
         const ox =
           pos?.x ??
-          arcX + (ci - (sub.cards.length - 1) / 2) * (CARD_W * scale * 0.55)
+          arcX + (ci - (sub.cards.length - 1) / 2) * (CARD_W * scale * 0.62)
         const oz = pos?.z ?? arcZ
         const rotY = pos?.rotY ?? Math.sin(i * 7.1 + ci) * 0.5 * 0.16
         desired.push({
@@ -717,14 +878,23 @@ export function createTableScene(): TableSceneApi {
     })
 
     const identitySig = desired.map((d) => `${d.key}:${d.revealed}`).join(';')
+    const stagedCount = stagedPlays.length
+    const confirmedCount = tableCards.filter(
+      (c) => !c.userData.cardKey?.startsWith('local:'),
+    ).length
     const forceRebuild =
-      identitySig !== tableGroup.userData.subIdentitySig || tableCards.length !== desired.length
+      identitySig !== tableGroup.userData.subIdentitySig ||
+      (confirmedCount !== desired.length && stagedCount === 0)
 
     function findOptimisticMatch(d: (typeof desired)[0], pool: CardMesh[]): CardMesh | undefined {
-      const localKey = `local:${d.playerId}:0:${d.text}`
       let card = pool.find((c) => c.userData.cardKey === d.key)
       if (card) return card
-      card = pool.find((c) => c.userData.cardKey === localKey)
+      // Match any staged local key for this text (pick > 1 uses :0:, :1:, …)
+      card = pool.find(
+        (c) =>
+          !!c.userData.cardKey?.startsWith(`local:${d.playerId}:`) &&
+          c.userData.cardText === d.text,
+      )
       if (card) return card
       card = pool.find(
         (c) =>
@@ -742,14 +912,20 @@ export function createTableScene(): TableSceneApi {
         if (!card || card.userData.dragging) continue
         card.userData.selectable = state.phase === 'voting'
         card.userData.submissionPlayerId = d.playerId
+        const myVote = localVoteId || state.votes?.[localId]
+        const isVoted = state.phase === 'voting' && myVote === d.playerId
+        const isWinner =
+          (state.phase === 'scoring' || state.phase === 'ended') &&
+          state.winnerId === d.playerId
+        applyVoteGlow(card, isVoted, isWinner, false)
         const toY = TABLE_CARD_Y + d.subIndex * 0.002
         card.userData.baseY = toY
-        if (d.hasServerPos) {
+        // Don't snap pinned/local cards — players can throw them around
+        if (d.hasServerPos && !card.userData.pinned) {
           card.position.x = d.x
           card.position.z = d.z
           card.userData.baseRotY = d.rotY
           card.rotation.y = d.rotY
-          card.userData.pinned = true
         }
         card.position.y = card.userData.baseY + card.userData.lift.value
         if (d.revealed && card.userData.kind === 'white') {
@@ -771,30 +947,11 @@ export function createTableScene(): TableSceneApi {
       let card = findOptimisticMatch(d, prevCards.filter((c) => !used.has(c)))
       if (card && !used.has(card)) {
         used.add(card)
-        if (
-          card.userData.kind !== (d.revealed ? 'white' : 'back') ||
-          (d.revealed && card.userData.cardText !== d.text && card.userData.cardText !== '???')
-        ) {
-          // Face/kind mismatch — rebuild mesh but keep position if pinned/local
-          const keepX = card.position.x
-          const keepZ = card.position.z
-          const keepRotY = card.userData.baseRotY
-          const keepPinned = card.userData.pinned
-          tableGroup.remove(card)
-          disposeCardMesh(card)
-          card = createCard(d.revealed ? d.text : 'Peril', d.revealed ? 'white' : 'back')
-          card.scale.setScalar(scale)
-          card.userData.baseRotX = TABLE_FACE_UP_X
-          card.userData.baseRotZ = 0
-          card.rotation.x = TABLE_FACE_UP_X
-          card.position.x = keepX
-          card.position.z = keepZ
-          card.userData.baseRotY = keepRotY
-          card.rotation.y = keepRotY
-          card.userData.pinned = keepPinned
-          tableGroup.add(card)
-          used.add(card)
-        }
+        const wantKind: 'white' | 'back' = d.revealed ? 'white' : 'back'
+        const wantText = d.revealed ? d.text : 'Peril'
+        // Keep the same mesh — only swap face textures so throws stay continuous
+        setCardFace(card, wantText, wantKind)
+        ensureHitbox(card)
       } else {
         card = undefined
       }
@@ -805,6 +962,7 @@ export function createTableScene(): TableSceneApi {
         card.userData.baseRotX = TABLE_FACE_UP_X
         card.userData.baseRotZ = 0
         card.rotation.x = TABLE_FACE_UP_X
+        ensureHitbox(card)
         tableGroup.add(card)
       }
 
@@ -815,6 +973,12 @@ export function createTableScene(): TableSceneApi {
       card.userData.submissionPlayerId = d.playerId
       card.userData.index = d.subIndex
       card.userData.selectable = state.phase === 'voting'
+      const myVote = localVoteId || state.votes?.[localId]
+      const isVoted = state.phase === 'voting' && myVote === d.playerId
+      const isWinner =
+        (state.phase === 'scoring' || state.phase === 'ended') &&
+        state.winnerId === d.playerId
+      applyVoteGlow(card, isVoted, isWinner, false)
 
       const toY = TABLE_CARD_Y + d.subIndex * 0.002
       const draggingThis =
@@ -891,8 +1055,18 @@ export function createTableScene(): TableSceneApi {
       newCards.push(card)
     }
 
+    // Keep staged local plays that the server hasn't confirmed yet
+    for (const staged of stagedPlays) {
+      if (!newCards.includes(staged.card) && staged.card.parent === tableGroup) {
+        used.add(staged.card)
+        newCards.push(staged.card)
+      }
+    }
+
     for (const old of tableCards) {
       if (!used.has(old) && !newCards.includes(old)) {
+        // Never dispose a card we're still staging
+        if (stagedPlays.some((s) => s.card === old)) continue
         tableGroup.remove(old)
         disposeCardMesh(old)
       }
@@ -901,6 +1075,31 @@ export function createTableScene(): TableSceneApi {
     tableCards = newCards
     tableGroup.userData.subIdentitySig = identitySig
     knownSubKeys = nextKeys
+  }
+
+  function applyVoteGlow(card: CardMesh, voted: boolean, winner: boolean, hovered = false) {
+    const mats = card.material as THREE.MeshStandardMaterial[]
+    let emissive = '#000000'
+    let intensity = 0
+    if (winner) {
+      emissive = '#2f6b38'
+      intensity = 0.48
+    } else if (voted) {
+      // Clear green confirmation for the play you voted for
+      emissive = '#2f8a44'
+      intensity = 0.55
+    } else if (hovered) {
+      emissive = '#c8a84a'
+      intensity = 0.42
+    }
+    for (const m of mats) {
+      if (!m || !('emissive' in m)) continue
+      m.emissive = new THREE.Color(emissive)
+      m.emissiveIntensity = intensity
+    }
+    if (voted || winner || hovered) {
+      card.userData.baseY = Math.max(card.userData.baseY, TABLE_CARD_Y + (hovered ? 0.02 : 0.012))
+    }
   }
 
   function applyGhost(drag: CardDrag | null) {
@@ -985,19 +1184,28 @@ export function createTableScene(): TableSceneApi {
     }
   }
 
+  function updateHandDragPlane() {
+    if (!handGroup || !camera) return
+    handGroup.getWorldPosition(_handPlanePoint)
+    // Plane facing the camera through the hand fan
+    camera.getWorldDirection(_handPlaneNormal)
+    handPlane.setFromNormalAndCoplanarPoint(_handPlaneNormal, _handPlanePoint)
+  }
+
   function updateLocalDragPosition() {
     if (!localDrag || !camera) return
     const zone = zoneFromPointer(pointerScreenY)
     const useHandPlane = localDrag.source === 'hand' && zone === 'hand'
+    if (useHandPlane) updateHandDragPlane()
+    else tablePlane.constant = -(TABLE_Y + TABLE_CARD_Y + 0.018)
     const plane = useHandPlane ? handPlane : tablePlane
-    plane.constant = useHandPlane
-      ? -HAND_GROUP_Y
-      : -(TABLE_Y + TABLE_CARD_Y + 0.018)
     const hit = projectOntoPlane(plane)
     if (!hit) return
 
     if (localDrag.source === 'hand') {
-      if (zone === 'table' || lookClose) {
+      // Reorder-only drags stay in the hand — never cross onto the table
+      const allowTable = !!localDrag.canPlay
+      if (allowTable && (zone === 'table' || lookClose)) {
         if (localDrag.card.parent !== tableGroup && tableGroup) {
           const w = new THREE.Vector3()
           localDrag.card.getWorldPosition(w)
@@ -1015,7 +1223,8 @@ export function createTableScene(): TableSceneApi {
         }
         if (tableGroup) {
           const loc = tableGroup.worldToLocal(hit)
-          const c = clampToTable(loc.x, loc.z)
+          const raw = clampToTable(loc.x, loc.z)
+          const c = resolveDropAgainstTable(localDrag.card, raw.x, raw.z)
           localDrag.followX.center = c.x
           localDrag.followZ.center = c.z
           localDrag.followY.center = TABLE_CARD_Y + 0.045
@@ -1031,20 +1240,32 @@ export function createTableScene(): TableSceneApi {
           localDrag.followX.set(loc.x)
           localDrag.followY.set(loc.y)
           localDrag.followZ.set(loc.z)
-          localDrag.card.userData.baseRotX = -0.2
+          localDrag.card.userData.baseRotX = -0.08
           localDrag.card.rotation.order = 'YXZ'
         }
         if (handGroup) {
           const loc = handGroup.worldToLocal(hit)
           localDrag.followX.center = loc.x
+          localDrag.followY.center = Math.max(loc.y, 0.06)
           localDrag.followZ.center = loc.z
-          localDrag.followY.center = 0.1
-          localDrag.card.rotation.x = -0.2
+          localDrag.card.rotation.x = -0.08
+          // Reorder while dragging across the fan
+          if (localDrag.moved && handCards.length > 1) {
+            const n = handCards.length
+            const { spread, start } = handSlotLayout(n, 0)
+            const slot = Math.round((loc.x - start) / Math.max(spread, 0.001))
+            const clamped = THREE.MathUtils.clamp(slot, 0, n - 1)
+            const from = localDrag.handIndex ?? handCards.indexOf(localDrag.card)
+            if (from >= 0 && clamped !== from && clamped !== localDrag.reorderSlot) {
+              reorderHandToSlot(from, clamped)
+            }
+          }
         }
       }
     } else if (tableGroup) {
       const loc = tableGroup.worldToLocal(hit)
-      const c = clampToTable(loc.x, loc.z)
+      const raw = clampToTable(loc.x, loc.z)
+      const c = resolveDropAgainstTable(localDrag.card, raw.x, raw.z)
       localDrag.followX.center = c.x
       localDrag.followZ.center = c.z
       localDrag.followY.center = TABLE_CARD_Y + 0.045
@@ -1067,11 +1288,27 @@ export function createTableScene(): TableSceneApi {
     }
     localDrag = null
     dragCb(null)
-    layoutHand(room?.you?.hand || handCards.map((c) => c.userData.cardText))
+    applyHandSlotTargets(true)
   }
 
   function endHandDragPlay() {
     if (!localDrag || localDrag.source !== 'hand' || !tableGroup) return
+    // Enforce one play per round — extra drops snap back to hand
+    if (
+      room?.phase !== 'playing' ||
+      room.czarId === localId ||
+      playSubmitPending ||
+      room.submissions?.some((s) => s.playerId === localId)
+    ) {
+      endHandDragCancel()
+      return
+    }
+    const pick = room?.blackCard?.pick || 1
+    if (stagedPlays.length >= pick) {
+      endHandDragCancel()
+      return
+    }
+
     const card = localDrag.card
     const text = localDrag.cardText
     let x = card.position.x
@@ -1083,14 +1320,16 @@ export function createTableScene(): TableSceneApi {
       x = loc.x
       z = loc.z
     }
-    const c = clampToTable(x, z)
+    const raw = clampToTable(x, z)
+    const c = resolveDropAgainstTable(card, raw.x, raw.z)
     const rotY = localDrag.rotY
-    const pick = room?.blackCard?.pick || 1
     const stageIndex = stagedPlays.length
 
+    // Same mesh continues onto the table — no recreate
     handGroup?.remove(card)
     if (card.parent !== tableGroup) tableGroup.add(card)
-    card.position.set(c.x, TABLE_CARD_Y + 0.06, c.z)
+    ensureHitbox(card)
+    card.position.set(c.x, TABLE_CARD_Y + 0.08, c.z)
     card.userData.baseRotX = TABLE_FACE_UP_X
     card.rotation.x = TABLE_FACE_UP_X
     card.rotation.y = rotY
@@ -1098,7 +1337,7 @@ export function createTableScene(): TableSceneApi {
     card.rotation.z = 0
     card.userData.baseRotZ = 0
     card.scale.setScalar(0.95)
-    dropCard(card, TABLE_CARD_Y + 0.06, TABLE_CARD_Y)
+    dropCard(card, TABLE_CARD_Y + 0.08, TABLE_CARD_Y)
     card.userData.cardKey = `local:${localId}:${stageIndex}:${text}`
     card.userData.submissionPlayerId = localId
     card.userData.cardText = text
@@ -1107,17 +1346,19 @@ export function createTableScene(): TableSceneApi {
     card.userData.selectable = false
 
     handCards = handCards.filter((h) => h !== card)
+    applyHandSlotTargets(true)
     if (!tableCards.includes(card)) tableCards.push(card)
+    separateTableCards(null)
 
     stagedPlays.push({ text, x: c.x, z: c.z, rotY, card })
     localDrag = null
     dragCb(null)
 
-    // Only submit when we've staged the full pick count — avoids "Play exactly N" errors
+    // Only submit when we've staged the full pick count — keeps staging until ack
     if (stagedPlays.length >= pick) {
       const cards = stagedPlays.map((s) => s.text)
       const positions = stagedPlays.map((s) => ({ x: s.x, z: s.z, rotY: s.rotY }))
-      stagedPlays = []
+      playSubmitPending = true
       playCb(cards, positions)
     }
   }
@@ -1126,8 +1367,10 @@ export function createTableScene(): TableSceneApi {
     if (!localDrag || localDrag.source !== 'table') return
     const card = localDrag.card
     const key = localDrag.cardKey || card.userData.cardKey || ''
-    const x = card.position.x
-    const z = card.position.z
+    const raw = clampToTable(card.position.x, card.position.z)
+    const settled = resolveDropAgainstTable(card, raw.x, raw.z)
+    card.position.x = settled.x
+    card.position.z = settled.z
     const rotY = localDrag.rotY
     card.userData.dragging = false
     card.userData.pinned = true
@@ -1136,9 +1379,10 @@ export function createTableScene(): TableSceneApi {
     card.userData.baseRotX = TABLE_FACE_UP_X
     card.rotation.x = TABLE_FACE_UP_X
     dropCard(card, card.position.y, TABLE_CARD_Y)
+    separateTableCards(null)
     localDrag = null
     dragCb(null)
-    if (key) moveTableCb(key, x, z, rotY)
+    if (key) moveTableCb(key, settled.x, settled.z, rotY)
   }
 
   function onPointerDown(ev: PointerEvent) {
@@ -1151,26 +1395,36 @@ export function createTableScene(): TableSceneApi {
       room.phase === 'playing' &&
       zone === 'hand' &&
       !lookClose &&
-      room.czarId !== localId
+      handCards.length > 0
     ) {
       const hits = raycaster.intersectObjects(handCards, true)
       if (hits.length) {
         const card = cardFromIntersect(hits[0].object)
         if (!card) return
+        const pick = room.blackCard?.pick || 1
+        const canThrow =
+          room.czarId !== localId &&
+          !playSubmitPending &&
+          !room.submissions?.some((s) => s.playerId === localId) &&
+          stagedPlays.length < pick
         card.userData.dragging = true
         localDrag = {
           source: 'hand',
           card,
           cardText: card.userData.cardText,
           handIndex: card.userData.index,
+          reorderSlot: card.userData.index,
           pointerId: ev.pointerId,
           startX: ev.clientX,
           startY: ev.clientY,
           moved: false,
-          rotY: (Math.random() - 0.5) * 0.18,
+          // Mark non-throwable drags so pointer-up always cancels to hand
+          rotY: canThrow ? (Math.random() - 0.5) * 0.18 : 0,
           ...makeDragSprings(card.position.x, card.position.y + 0.04, card.position.z),
         }
+        localDrag.canPlay = canThrow
         localDrag.followY.center = card.position.y + 0.04
+        card.renderOrder = 5
         setHover(null)
         try {
           ;(ev.currentTarget as HTMLElement).setPointerCapture?.(ev.pointerId)
@@ -1178,7 +1432,7 @@ export function createTableScene(): TableSceneApi {
           /* ignore */
         }
         updateLocalDragPosition()
-        broadcastDrag(performance.now() + DRAG_BROADCAST_MS)
+        if (canThrow) broadcastDrag(performance.now() + DRAG_BROADCAST_MS)
         ev.preventDefault()
         return
       }
@@ -1198,24 +1452,12 @@ export function createTableScene(): TableSceneApi {
         if (!card) return
         const key = card.userData.cardKey as string | undefined
         if (room.phase === 'voting') {
-          // Potential click-vote; becomes rearrange if moved past CLICK_MOVE_PX
-          if (!key) card.userData.cardKey = `loose:${card.userData.submissionPlayerId || 'x'}:${card.userData.index}`
-          localDrag = {
-            source: 'table',
-            card,
-            cardText: card.userData.cardText,
-            cardKey: card.userData.cardKey,
-            pointerId: ev.pointerId,
-            startX: ev.clientX,
-            startY: ev.clientY,
-            moved: false,
-            rotY: card.userData.baseRotY || 0,
-            ...makeDragSprings(card.position.x, card.position.y, card.position.z),
-          }
-          try {
-            ;(ev.currentTarget as HTMLElement).setPointerCapture?.(ev.pointerId)
-          } catch {
-            /* ignore */
+          // Voting is click-only — no rearrange, so votes aren't lost to micro-drags
+          const pid = card.userData.submissionPlayerId
+          if (pid && pid !== 'hidden' && pid !== localId) {
+            localVoteId = pid
+            applyVoteGlow(card, true, false, false)
+            voteCb(pid)
           }
           ev.preventDefault()
           return
@@ -1254,10 +1496,16 @@ export function createTableScene(): TableSceneApi {
     if (!camera || !threeRenderer || !root) return
     updatePointerFromEvent(ev)
 
-    // Map upper half → full table overview with a snappy ease-in
+    // Map upper half → table overview; during voting, bias toward the table
     const raw = THREE.MathUtils.clamp((HAND_ZONE_Y - pointerScreenY) / 0.4, 0, 1)
-    const tableAmount = raw * raw // ease toward table so tilt reads clearly
-    camBlend.center = lookClose ? Math.max(tableAmount, 0.95) : tableAmount
+    const tableAmount = raw * raw
+    const phaseBias =
+      room?.phase === 'voting' || room?.phase === 'scoring' || room?.phase === 'revealing'
+        ? 0.55
+        : 0
+    camBlend.center = lookClose
+      ? Math.max(tableAmount, 0.95)
+      : Math.max(tableAmount, phaseBias)
     if (tableAmount > 0.04 || lookClose) {
       camPanX.center = THREE.MathUtils.clamp(pointerNdc.x, -1, 1) * 0.35
       camPanZ.center = THREE.MathUtils.clamp(0.4 - pointerScreenY, -0.4, 0.4) * 0.2
@@ -1283,6 +1531,7 @@ export function createTableScene(): TableSceneApi {
     const zone = lookClose ? 'table' : zoneFromPointer(pointerScreenY)
     raycaster.setFromCamera(pointer, camera)
     if (zone === 'hand' && !lookClose) {
+      hoveredTableCard = null
       const hits = raycaster.intersectObjects(
         handCards.filter((c) => !c.userData.dragging),
         true,
@@ -1299,9 +1548,17 @@ export function createTableScene(): TableSceneApi {
       )
       if (hits.length) {
         const card = cardFromIntersect(hits[0].object)
-        if (card) setHover(card.userData.index)
-        else setHover(null)
-      } else setHover(null)
+        if (card) {
+          hoveredTableCard = card
+          setHover(card.userData.index)
+        } else {
+          hoveredTableCard = null
+          setHover(null)
+        }
+      } else {
+        hoveredTableCard = null
+        setHover(null)
+      }
     }
   }
 
@@ -1310,25 +1567,15 @@ export function createTableScene(): TableSceneApi {
     updatePointerFromEvent(ev)
     const zone = lookClose ? 'table' : zoneFromPointer(pointerScreenY)
 
-    if (room?.phase === 'voting' && localDrag.source === 'table') {
-      const card = localDrag.card
-      const wasClick = !localDrag.moved
-      if (wasClick) {
-        localDrag = null
-        dragCb(null)
-        const pid = card.userData.submissionPlayerId
-        if (pid && pid !== 'hidden' && pid !== localId) voteCb(pid)
-      } else if (card.userData.dragging || localDrag.moved) {
-        endTableDrag()
-      } else {
-        localDrag = null
-        dragCb(null)
-      }
-      return
-    }
-
     if (localDrag.source === 'hand') {
-      if (zone === 'table' || lookClose) endHandDragPlay()
+      const canPlay =
+        !!localDrag.canPlay &&
+        room?.phase === 'playing' &&
+        room.czarId !== localId &&
+        !playSubmitPending &&
+        !room.submissions?.some((s) => s.playerId === localId) &&
+        (zone === 'table' || lookClose)
+      if (canPlay) endHandDragPlay()
       else endHandDragCancel()
       return
     }
@@ -1344,7 +1591,10 @@ export function createTableScene(): TableSceneApi {
   }
 
   function onPointerLeaveCanvas() {
-    if (!localDrag) setHover(null)
+    if (!localDrag) {
+      setHover(null)
+      hoveredTableCard = null
+    }
   }
 
   function setState(state: RoomState, localPlayerId: string) {
@@ -1362,26 +1612,42 @@ export function createTableScene(): TableSceneApi {
     }
     syncAvatars(state, localPlayerId)
     syncBlack(state)
-    syncSubmissions(state)
-    // Clear staging when our submission is confirmed or round changes
+
+    const serverHasMyPlay = !!state.submissions?.some((s) => s.playerId === localPlayerId)
+    // Keep staged cards until the server confirms our submission (prevents bounce-back)
     if (state.phase !== 'playing') {
       stagedPlays = []
-    } else if (state.submissions?.some((s) => s.playerId === localPlayerId)) {
+      playSubmitPending = false
+    } else if (serverHasMyPlay) {
       stagedPlays = []
+      playSubmitPending = false
     }
+
+    // Sync optimistic vote with server
+    if (state.phase !== 'voting') {
+      localVoteId = null
+    } else if (state.votes?.[localPlayerId]) {
+      localVoteId = state.votes[localPlayerId]
+    }
+
+    syncSubmissions(state)
+
     const rawHand = state.you?.hand || []
     const optimisticPlayed = new Map<string, number>()
     for (const s of stagedPlays) {
       optimisticPlayed.set(s.text, (optimisticPlayed.get(s.text) || 0) + 1)
     }
-    for (const c of tableCards) {
-      if (
-        c.userData.cardKey?.startsWith(`local:${localPlayerId}:`) ||
-        (c.userData.pinned && c.userData.submissionPlayerId === localPlayerId)
-      ) {
-        const t = c.userData.cardText
-        if (t && t !== '???') {
-          optimisticPlayed.set(t, (optimisticPlayed.get(t) || 0) + 1)
+    // Only count local table cards while still staging / pending ack
+    if (!serverHasMyPlay) {
+      for (const c of tableCards) {
+        if (
+          c.userData.cardKey?.startsWith(`local:${localPlayerId}:`) ||
+          (c.userData.pinned && c.userData.submissionPlayerId === localPlayerId)
+        ) {
+          const t = c.userData.cardText
+          if (t && t !== '???') {
+            optimisticPlayed.set(t, (optimisticPlayed.get(t) || 0) + 1)
+          }
         }
       }
     }
@@ -1405,6 +1671,35 @@ export function createTableScene(): TableSceneApi {
     }
   }
 
+  function revertStagedPlays() {
+    if (!handGroup || !stagedPlays.length) {
+      playSubmitPending = false
+      return
+    }
+    const texts = stagedPlays.map((s) => s.text)
+    for (const s of stagedPlays) {
+      tableGroup?.remove(s.card)
+      tableCards = tableCards.filter((c) => c !== s.card)
+      s.card.userData.dragging = false
+      s.card.userData.pinned = false
+      s.card.userData.cardKey = undefined
+      s.card.userData.submissionPlayerId = undefined
+      s.card.scale.setScalar(1)
+      handGroup.add(s.card)
+      if (!handCards.includes(s.card)) handCards.push(s.card)
+    }
+    stagedPlays = []
+    playSubmitPending = false
+    // Rebuild hand including restored cards
+    const merged = [...(room?.you?.hand || [])]
+    for (const t of texts) {
+      // ensure restored texts appear even if server already removed them optimistically
+      if (!merged.includes(t)) merged.push(t)
+    }
+    // Prefer current handCards order + restored
+    layoutHand(handCards.map((c) => c.userData.cardText))
+  }
+
   function setPeerHover(playerId: string, cardIndex: number | null, cardText?: string | null) {
     peerHover.set(playerId, cardIndex)
     if (cardText !== undefined) peerHoverText.set(playerId, cardText)
@@ -1417,8 +1712,14 @@ export function createTableScene(): TableSceneApi {
   function setHover(index: number | null) {
     if (hoveredIndex === index) return
     hoveredIndex = index
-    const text = index != null ? handCards[index]?.userData.cardText ?? null : null
-    hoverCb(index, text)
+    const text =
+      index != null && zoneFromPointer(pointerScreenY) === 'hand'
+        ? handCards[index]?.userData.cardText ?? null
+        : null
+    // Only broadcast hand peeks
+    if (zoneFromPointer(pointerScreenY) === 'hand' || index == null) {
+      hoverCb(index, text)
+    }
   }
 
   function lookCloser(on: boolean) {
@@ -1442,6 +1743,9 @@ export function createTableScene(): TableSceneApi {
       const z = localDrag.followZ.animate(dt)
       localDrag.card.position.set(x, y, z)
       localDrag.card.userData.baseY = y
+      if (localDrag.source === 'table' || localDrag.card.parent === tableGroup) {
+        separateTableCards(localDrag.card)
+      }
     }
 
     if (camera) {
@@ -1455,37 +1759,64 @@ export function createTableScene(): TableSceneApi {
       baseTarget.z += camPanZ.value * 0.15
       camera.position.copy(basePos)
       camera.lookAt(baseTarget)
-      // Closer FOV when peeking so text fills the view
-      camera.fov = THREE.MathUtils.lerp(46, 30, t)
+      // Middleground FOV; peek tightens so table text is readable
+      camera.fov = THREE.MathUtils.lerp(FOV_HAND, FOV_TABLE, t)
       camera.updateProjectionMatrix()
     }
 
     if (handGroup) {
-      const handOpacity = 1 - camBlend.value
-      handGroup.visible = handOpacity > 0.08
-      handGroup.position.y = HAND_GROUP_Y - camBlend.value * 0.12
-      handGroup.position.z = HAND_GROUP_Z + camBlend.value * 0.18
+      const t = camBlend.value
+      const hideForVote =
+        room?.phase === 'voting' || room?.phase === 'scoring' || room?.phase === 'revealing'
+      handGroup.visible = t < 0.85 && !hideForVote
+      handGroup.position.set(
+        HAND_CAM_X,
+        HAND_CAM_Y - t * 0.16,
+        HAND_CAM_Z - t * 0.06,
+      )
+      handGroup.rotation.x = 0.08 + t * 0.12
     }
 
     const inHandZone = !lookClose && zoneFromPointer(pointerScreenY) === 'hand'
     handCards.forEach((c, i) => {
       if (c.userData.dragging) return
+      // Spring toward reorder slots
+      if (c.userData.posX) {
+        c.position.x = c.userData.posX.animate(dt)
+        c.position.z = c.userData.posZ.animate(dt)
+      }
       const hovered = hoveredIndex === i && inHandZone
       const sel = selected.has(c.userData.cardText)
-      // Peek: lift height only, minimal tilt
       updateCardMotion(c, dt, hovered, sel, { lift: 0.07, tiltX: -0.018, tiltZ: 0.006 })
     })
 
     const inTableZone = lookClose || zoneFromPointer(pointerScreenY) === 'table'
+    const voting = room?.phase === 'voting'
+    const myVoteTarget = localVoteId || (localId ? room?.votes?.[localId] : null) || null
     tableCards.forEach((c) => {
       if (c.userData.dragging) return
-      const hovered = inTableZone && hoveredIndex === c.userData.index
-      updateCardMotion(c, dt, hovered, false, { lift: 0.028, tiltX: 0 })
+      const hovered = inTableZone && hoveredTableCard === c
+      const voted = voting && !!myVoteTarget && myVoteTarget === c.userData.submissionPlayerId
+      const isWinner =
+        (room?.phase === 'scoring' || room?.phase === 'ended') &&
+        room?.winnerId === c.userData.submissionPlayerId
+      if (voting || isWinner) {
+        applyVoteGlow(c, !!voted, !!isWinner, hovered && voting && !voted)
+      }
+      updateCardMotion(c, dt, hovered || !!voted, false, {
+        lift: voting ? (voted ? 0.04 : hovered ? 0.055 : 0.01) : hovered ? 0.032 : 0.012,
+        tiltX: 0,
+      })
       c.rotation.x = c.userData.baseRotX
     })
     if (blackCard) {
       updateCardMotion(blackCard, dt, false, false)
       blackCard.rotation.x = blackCard.userData.baseRotX
+    }
+
+    // Soft settle so cards don't rest intersecting (skip while rearranging)
+    if (localDrag?.source === 'table' || localDrag?.card?.parent === tableGroup) {
+      separateTableCards(localDrag.card)
     }
 
     const t = clock.elapsedTime
@@ -1523,6 +1854,7 @@ export function createTableScene(): TableSceneApi {
     setState,
     setPeerHover,
     setPeerDrag,
+    revertStagedPlays,
     lookCloser,
     resize,
     get onPlayCards() {
