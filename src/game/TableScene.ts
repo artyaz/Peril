@@ -58,10 +58,10 @@ const DRAG_STIFF = 420
 const DRAG_DAMP = 34
 /** Local hand lives in camera space so framing never clips. */
 const HAND_CAM_X = 0
-const HAND_CAM_Y = -0.14
-const HAND_CAM_Z = -0.48
-const FOV_HAND = 60
-const FOV_TABLE = 52
+const HAND_CAM_Y = -0.08
+const HAND_CAM_Z = -0.42
+const FOV_HAND = 64
+const FOV_TABLE = 55
 
 export function createTableScene(): TableSceneApi {
   let threeRenderer: THREE.WebGLRenderer | null = null
@@ -501,44 +501,49 @@ export function createTableScene(): TableSceneApi {
     }
     while (cards.length < handCount) {
       const card = createCard('Peril', 'back')
-      card.scale.setScalar(0.7)
+      card.scale.setScalar(0.85)
       const i = cards.length
       card.userData.index = i
       handle.handAnchor.add(card)
       cards.push(card)
     }
 
-    // Billboard the fan toward the local camera so cards always read portrait
-    handle.handAnchor.position.set(0, 0.4, 0.24)
+    // Orient the fan so card faces point at the local camera (readable portrait)
+    handle.handAnchor.position.set(0, 0.4, 0.2)
     if (camera) {
       const anchorWorld = new THREE.Vector3()
       handle.group.localToWorld(anchorWorld.copy(handle.handAnchor.position))
-      const camPos = camera.position.clone()
-      // Face camera in XZ; keep upright
-      const dx = camPos.x - anchorWorld.x
-      const dz = camPos.z - anchorWorld.z
-      const worldYaw = Math.atan2(dx, dz)
-      handle.handAnchor.rotation.set(0.08, worldYaw - handle.group.rotation.y, 0)
+      // Build a look-at matrix toward the camera, then convert to local space
+      const look = new THREE.Matrix4()
+      look.lookAt(anchorWorld, camera.position, new THREE.Vector3(0, 1, 0))
+      const worldQuat = new THREE.Quaternion().setFromRotationMatrix(look)
+      // lookAt faces -Z; cards face +Z, so flip 180° around Y
+      worldQuat.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI))
+      const parentQuat = new THREE.Quaternion()
+      handle.group.getWorldQuaternion(parentQuat)
+      const localQuat = parentQuat.clone().invert().multiply(worldQuat)
+      handle.handAnchor.quaternion.copy(localQuat)
     } else {
-      handle.handAnchor.rotation.set(0.08, 0, 0)
+      handle.handAnchor.rotation.set(-0.2, 0, 0)
     }
 
     const n = cards.length
-    const spread = Math.min(0.075, 0.48 / Math.max(n, 1))
+    const spread = Math.min(0.088, 0.55 / Math.max(n, 1))
     const start = -((n - 1) * spread) / 2
     cards.forEach((card, i) => {
       const mid = (n - 1) / 2
       const isPeek = hoverIdx === i
       card.position.x = start + i * spread
       card.position.y = isPeek ? 0.035 : 0
-      card.position.z = 0.005 * Math.abs(i - mid)
+      card.position.z = 0.006 * Math.abs(i - mid)
       card.userData.baseY = isPeek ? 0.035 : 0
-      card.userData.baseRotX = isPeek ? -0.04 : -0.1
-      card.userData.baseRotY = (i - mid) * -0.026
-      card.userData.baseRotZ = (i - mid) * -0.012
+      card.userData.baseRotX = 0
+      card.userData.baseRotY = (i - mid) * -0.032
+      card.userData.baseRotZ = (i - mid) * -0.016
       card.rotation.x = card.userData.baseRotX
       card.rotation.y = card.userData.baseRotY
       card.rotation.z = card.userData.baseRotZ
+      if (Math.abs(card.scale.x - 0.85) > 0.01) card.scale.setScalar(0.85)
       swapPeerCardFace(card, isPeek ? peekText : null, isPeek)
     })
   }
