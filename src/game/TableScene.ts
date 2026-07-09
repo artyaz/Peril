@@ -659,7 +659,7 @@ export function createTableScene(): TableSceneApi {
     if (!tableGroup) return
     const subs = state.submissions || []
     const nextKeys = new Set<string>()
-    const scale = 0.78
+    const scale = 0.85
 
     const desired: {
       key: string
@@ -677,8 +677,8 @@ export function createTableScene(): TableSceneApi {
     subs.forEach((sub, i) => {
       const n = subs.length
       const t = n === 1 ? 0.5 : i / (n - 1)
-      const arcX = (t - 0.5) * 0.55
-      const arcZ = 0.22
+      const arcX = (t - 0.5) * 0.4
+      const arcZ = 0.12
       sub.cards.forEach((text, ci) => {
         const key = cardKeyFor(sub.playerId, ci, text)
         nextKeys.add(key)
