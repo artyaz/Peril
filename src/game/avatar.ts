@@ -183,8 +183,8 @@ export function createAvatar(name: string, faceDataUrl?: string): AvatarHandle {
   group.add(ring)
 
   const handAnchor = new THREE.Group()
-  handAnchor.position.set(0, 0.48, 0.2)
-  handAnchor.rotation.x = -0.22
+  handAnchor.position.set(0, 0.36, 0.22)
+  handAnchor.rotation.x = 0.08
   group.add(handAnchor)
 
   let faceTex: THREE.Texture | null = null
