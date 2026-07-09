@@ -3,7 +3,7 @@
   import { route, navigate } from '../lib/router'
   import { loadSession, saveSession } from '../lib/session'
   import { loadPackIndex, type PackMeta } from '../lib/packs'
-  import type { RoomState, ClientMsg, ServerMsg } from '../lib/protocol'
+  import type { RoomState, ClientMsg, ServerMsg, ConnectionStatus } from '../lib/protocol'
   import { connectRoom, type RoomTransport } from '../lib/transport'
 
   const r = $route
@@ -18,6 +18,8 @@
   let showAll = $state(false)
   let facePreview = $state(session?.faceDataUrl || '')
   let transport: RoomTransport | null = null
+  let connection = $state<ConnectionStatus>('connecting')
+  let startBusy = $state(false)
 
   const isHost = $derived(!!room && !!session && room.hostId === session.id)
 
@@ -47,13 +49,17 @@
         }
       },
       onError: (m) => { error = m },
+      onStatus: (next) => {
+        connection = next
+        if (next === 'connected' && /reconnecting/i.test(error)) error = ''
+      },
     })
   })
 
   onDestroy(() => transport?.close())
 
-  function send(msg: ClientMsg) {
-    transport?.send(msg)
+  async function send(msg: ClientMsg) {
+    return transport?.send(msg)
   }
 
   function togglePack(id: string) {
@@ -61,11 +67,22 @@
     const next = selected.includes(id) ? selected.filter((x: string) => x !== id) : [...selected, id]
     if (!next.length) return
     selected = next
-    send({ type: 'set_packs', packIds: next })
+    void send({ type: 'set_packs', packIds: next }).catch(() => {})
   }
 
-  function start() {
-    send({ type: 'start' })
+  async function start() {
+    if (startBusy) return
+    startBusy = true
+    error = ''
+    try {
+      await send({ type: 'start' })
+    } catch {
+      startBusy = false
+    }
+  }
+
+  function leave() {
+    void send({ type: 'leave' }).finally(() => navigate({ name: 'home' }))
   }
 
   function onFace(e: Event) {
@@ -90,7 +107,7 @@
         facePreview = out
         saveSession({ ...session!, faceDataUrl: out })
         session = loadSession()
-        send({ type: 'set_face', faceDataUrl: out })
+        void send({ type: 'set_face', faceDataUrl: out }).catch(() => {})
       }
       img.src = dataUrl
     }
@@ -110,9 +127,12 @@
     <div class="top">
       <div>
         <h1 class="brand" style="font-size: clamp(2.2rem, 6vw, 3.4rem)">Room {code}</h1>
-        <p class="lede" style="margin-bottom: 1.5rem">{room?.name || '…'} · share the code · no login</p>
+        <p class="lede" style="margin-bottom: 1.5rem">
+          {room?.name || '…'} · share the code ·
+          <span class:online={connection === 'connected'}>{connection}</span>
+        </p>
       </div>
-      <button type="button" onclick={() => navigate({ name: 'home' })}>Leave</button>
+      <button type="button" onclick={leave}>Leave</button>
     </div>
 
     <div class="grid">
@@ -122,7 +142,11 @@
           <div class="player">
             <div class="avatar" style:background-image={p.faceDataUrl ? `url(${p.faceDataUrl})` : 'none'}></div>
             <div>
-              <div>{p.name}{#if p.isHost}<span class="tag">host</span>{/if}</div>
+              <div>
+                {p.name}
+                {#if p.isHost}<span class="tag">host</span>{/if}
+                {#if p.isBot}<span class="tag">bot</span>{/if}
+              </div>
               <div class="muted">{p.connected ? 'here' : 'away'}</div>
             </div>
           </div>
@@ -140,8 +164,10 @@
 
         {#if isHost}
           <div class="row">
-            <button type="button" onclick={() => send({ type: 'add_bot' })}>Add bot</button>
-            <button class="primary" type="button" onclick={start}>Start game</button>
+            <button type="button" onclick={() => void send({ type: 'add_bot' }).catch(() => {})}>Add bot</button>
+            <button class="primary" type="button" disabled={startBusy || connection !== 'connected'} onclick={start}>
+              {startBusy ? 'Starting…' : 'Start game'}
+            </button>
           </div>
           <p class="muted">Solo works — start seats bots so you can play alone.</p>
         {:else}
@@ -209,6 +235,8 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
   }
+  .online { color: #2f6b3d; }
+  button:disabled { cursor: wait; opacity: 0.6; }
   .face-preview {
     width: 72px;
     height: 72px;

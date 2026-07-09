@@ -5,6 +5,12 @@ import { Redis } from '@upstash/redis'
 
 const HAND_SIZE = 7
 const ROOM_TTL_SEC = 60 * 60 * 6
+const BOT_VOTE_DELAY_MS = 700
+const SCORE_SHOW_MS = 5_000
+const ROOM_LOCK_MS = 4_000
+const ROOM_LOCK_RETRIES = 20
+const PRESENCE_HEARTBEAT_MS = 5_000
+const PLAYER_TIMEOUT_MS = 20_000
 
 function randCode() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -87,7 +93,14 @@ function blankRoom({ code, name, hostId, packIds, maxPlayers }) {
     hover: {},
     hoverText: {},
     drag: null,
+    dragSequences: {},
     tablePositions: [],
+    roundPlayerIds: [],
+    nextSubmissionSeq: 0,
+    phaseStartedAt: Date.now(),
+    phaseEndsAt: null,
+    revision: 0,
+    processedActions: [],
     updatedAt: Date.now(),
   }
 }
@@ -102,8 +115,37 @@ function nextSeat(room) {
   return -1
 }
 
+function currentRoundIds(room) {
+  const ids = Array.isArray(room.roundPlayerIds) && room.roundPlayerIds.length
+    ? room.roundPlayerIds
+    : playerList(room).map((p) => p.id)
+  return ids.filter((id) => room.players[id])
+}
+
+function activeRoundIds(room) {
+  return currentRoundIds(room).filter((id) => {
+    const player = room.players[id]
+    return player && (player.connected || player.isBot)
+  })
+}
+
+function requiredSubmitterIds(room) {
+  return activeRoundIds(room).filter((id) => id !== room.czarId)
+}
+
+function eligibleVoterIds(room) {
+  const targets = new Set((room.submissions || []).map((s) => s.playerId))
+  return activeRoundIds(room).filter((id) => {
+    for (const target of targets) if (target !== id) return true
+    return false
+  })
+}
+
 function stateFor(room, viewerId) {
   const you = room.players[viewerId]
+  const roundIds = new Set(currentRoundIds(room))
+  const submitters = requiredSubmitterIds(room)
+  const voters = eligibleVoterIds(room)
   return {
     code: room.code,
     name: room.name,
@@ -117,6 +159,8 @@ function stateFor(room, viewerId) {
       connected: p.connected,
       faceDataUrl: p.faceDataUrl,
       isHost: p.id === room.hostId,
+      isBot: !!p.isBot,
+      activeThisRound: room.phase === 'lobby' || roundIds.has(p.id),
       handCount: (p.hand || []).length,
     })),
     packIds: room.packIds,
@@ -129,20 +173,37 @@ function stateFor(room, viewerId) {
         (room.phase === 'playing' && s.playerId !== viewerId) ||
         (room.phase === 'revealing' && !s.revealed)
       return {
+        id: s.id || `${room.round}:${s.playerId}`,
         playerId: room.phase === 'playing' && s.playerId !== viewerId ? 'hidden' : s.playerId,
         cards: hide ? s.cards.map(() => '???') : s.cards,
         revealed: !!s.revealed,
+        positions: (s.positions || []).map((p) => ({
+          x: Number(p?.x) || 0,
+          z: Number(p?.z) || 0,
+          rotY: Number(p?.rotY) || 0,
+        })),
       }
     }),
     votes: room.votes || {},
     winnerId: room.winnerId,
     round: room.round,
+    revision: room.revision || 0,
     hover: room.hover || {},
     hoverText: room.hoverText || {},
     drag: room.drag || null,
     tablePositions: room.tablePositions || [],
     you: you ? { hand: you.hand || [], selected: you.selected || [] } : undefined,
     updatedAt: room.updatedAt,
+    phaseStartedAt: room.phaseStartedAt,
+    phaseEndsAt: room.phaseEndsAt ?? null,
+    progress: {
+      submitted: submitters.filter((id) =>
+        (room.submissions || []).some((s) => s.playerId === id)
+      ).length,
+      submissionsRequired: submitters.length,
+      votesCast: voters.filter((id) => room.votes?.[id]).length,
+      votersRequired: voters.length,
+    },
   }
 }
 
@@ -167,43 +228,78 @@ function publicMeta(room) {
 }
 
 function touch(room) {
-  room.updatedAt = Date.now()
+  room.revision = (room.revision || 0) + 1
+  room.updatedAt = Math.max(Date.now(), (room.updatedAt || 0) + 1)
   return room
 }
 
+function remapRecord(record, oldId, newId, remapValues = false) {
+  const next = {}
+  for (const [key, value] of Object.entries(record || {})) {
+    next[key === oldId ? newId : key] =
+      remapValues && value === oldId ? newId : value
+  }
+  return next
+}
+
+function replaceBot(room, bot, { playerId, name, faceDataUrl, ip }) {
+  const oldId = bot.id
+  const priorRoundIds = Array.isArray(room.roundPlayerIds)
+    ? [...room.roundPlayerIds]
+    : playerList(room).map((player) => player.id)
+  delete room.players[oldId]
+  bot.id = playerId
+  bot.name = (name || 'Player').slice(0, 24)
+  bot.connected = true
+  bot.faceDataUrl = faceDataUrl || undefined
+  bot.ip = ip
+  bot.isBot = false
+  bot.lastSeenAt = Date.now()
+  room.players[playerId] = bot
+
+  if (room.czarId === oldId) room.czarId = playerId
+  room.roundPlayerIds = priorRoundIds.map((id) => id === oldId ? playerId : id)
+  for (const submission of room.submissions || []) {
+    if (submission.playerId === oldId) submission.playerId = playerId
+  }
+  room.votes = remapRecord(room.votes, oldId, playerId, true)
+  room.hover = remapRecord(room.hover, oldId, playerId)
+  room.hoverText = remapRecord(room.hoverText, oldId, playerId)
+  if (room.drag?.playerId === oldId) room.drag.playerId = playerId
+  return bot
+}
+
 function joinRoom(room, { playerId, name, faceDataUrl, ip }) {
+  if (!playerId) throw new Error('Player identity is required')
   let player = room.players[playerId]
   if (player) {
     player.connected = true
     player.name = (name || player.name).slice(0, 24)
     if (faceDataUrl) player.faceDataUrl = faceDataUrl
+    player.lastSeenAt = Date.now()
     if (ip) room.ipBindings[ip] = playerId
     return touch(room)
   }
 
-  const bound = ip ? room.ipBindings[ip] : null
-  if (bound && room.players[bound] && !room.players[bound].connected) {
-    const existing = room.players[bound]
-    delete room.players[bound]
-    existing.id = playerId
-    existing.name = (name || existing.name).slice(0, 24)
-    existing.connected = true
-    if (faceDataUrl) existing.faceDataUrl = faceDataUrl
-    if (room.hostId === bound) room.hostId = playerId
-    if (room.czarId === bound) room.czarId = playerId
-    for (const s of room.submissions) if (s.playerId === bound) s.playerId = playerId
-    const votes = {}
-    for (const [k, v] of Object.entries(room.votes || {})) {
-      votes[k === bound ? playerId : k] = v === bound ? playerId : v
+  // A late guest takes a bot's seat, hand, and score so an invite remains useful
+  // after the game starts without changing the current round's participant count.
+  if (room.phase !== 'lobby') {
+    const bots = playerList(room).filter((p) => p.isBot)
+    const bot =
+      bots.find((p) =>
+        p.id !== room.czarId &&
+        !(room.submissions || []).some((s) => s.playerId === p.id)
+      ) ||
+      bots.find((p) => p.id !== room.czarId) ||
+      bots[0]
+    if (bot) {
+      replaceBot(room, bot, { playerId, name, faceDataUrl, ip })
+      if (ip) room.ipBindings[ip] = playerId
+      return touch(room)
     }
-    room.votes = votes
-    room.players[playerId] = existing
-    if (ip) room.ipBindings[ip] = playerId
-    return touch(room)
   }
 
   if (Object.keys(room.players).length >= room.maxPlayers) throw new Error('Room is full')
-  if (room.phase !== 'lobby') throw new Error('Game already started')
   const seat = nextSeat(room)
   if (seat < 0) throw new Error('No seats')
 
@@ -218,6 +314,10 @@ function joinRoom(room, { playerId, name, faceDataUrl, ip }) {
     selected: [],
     ip,
     isBot: false,
+    lastSeenAt: Date.now(),
+  }
+  if (room.phase === 'lobby') {
+    room.roundPlayerIds = []
   }
   if (ip) room.ipBindings[ip] = playerId
   if (!room.hostId) room.hostId = playerId
@@ -241,6 +341,7 @@ function addBot(room) {
     selected: [],
     ip: 'bot',
     isBot: true,
+    lastSeenAt: Date.now(),
   }
   return touch(room)
 }
@@ -267,6 +368,8 @@ function dealHands(room) {
 function beginRound(room) {
   room.round += 1
   room.phase = 'playing'
+  room.phaseStartedAt = Date.now()
+  room.phaseEndsAt = null
   room.submissions = []
   room.votes = {}
   room.winnerId = null
@@ -275,7 +378,9 @@ function beginRound(room) {
   room.drag = null
   room.tablePositions = []
   for (const p of Object.values(room.players)) p.selected = []
-  const players = playerList(room)
+  const players = playerList(room).filter((p) => p.connected || p.isBot)
+  if (players.length < 2) throw new Error('At least two active players are required')
+  room.roundPlayerIds = players.map((p) => p.id)
   // Round 1: prefer a bot czar so the human can test putting cards down
   if (room.round === 1) {
     const bot = players.find((p) => p.isBot)
@@ -291,7 +396,7 @@ function beginRound(room) {
 }
 
 function startGame(room) {
-  if (room.phase !== 'lobby') return room
+  if (room.phase !== 'lobby') throw new Error('Game has already started')
   while (Object.keys(room.players).length < 3) addBot(room)
   const decks = loadPackCards(room.packIds)
   if (decks.white.length < Object.keys(room.players).length * HAND_SIZE + 10) {
@@ -311,11 +416,33 @@ function startGame(room) {
   return beginRound(room)
 }
 
-function playCards(room, playerId, cards, positions) {
+function finiteOr(value, fallback) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : fallback
+}
+
+function maybeStartVoting(room) {
   if (room.phase !== 'playing') return room
+  const needed = requiredSubmitterIds(room)
+  if (!needed.length) return room
+  const submitted = new Set((room.submissions || []).map((s) => s.playerId))
+  if (!needed.every((id) => submitted.has(id))) return room
+
+  shuffle(room.submissions)
+  for (const submission of room.submissions) submission.revealed = true
+  room.phase = 'voting'
+  room.phaseStartedAt = Date.now()
+  room.phaseEndsAt = null
+  room.votes = {}
+  return touch(room)
+}
+
+function playCards(room, playerId, cards, positions) {
+  if (room.phase !== 'playing') throw new Error('Cards can only be played during the play phase')
   if (playerId === room.czarId) throw new Error('Card Czar waits')
   const player = room.players[playerId]
-  if (!player) return room
+  if (!player) throw new Error('Player not found')
+  if (!currentRoundIds(room).includes(playerId)) throw new Error('You join the game next round')
   if (room.submissions.some((s) => s.playerId === playerId)) throw new Error('Already played')
   const pick = room.blackCard?.pick || 1
   if (!Array.isArray(cards) || cards.length !== pick) throw new Error(`Play exactly ${pick} card(s)`)
@@ -326,36 +453,39 @@ function playCards(room, playerId, cards, positions) {
   }
   player.selected = cards
   const pos = (positions || []).slice(0, cards.length).map((p, i) => ({
-    x: Number(p?.x) || (i - (cards.length - 1) / 2) * 0.2,
-    z: Number(p?.z) || 0.28,
-    rotY: Number(p?.rotY) || (Math.random() - 0.5) * 0.25,
+    x: finiteOr(p?.x, (i - (cards.length - 1) / 2) * 0.2),
+    z: finiteOr(p?.z, 0.28),
+    rotY: finiteOr(p?.rotY, 0),
   }))
   while (pos.length < cards.length) {
     const i = pos.length
     pos.push({
       x: (i - (cards.length - 1) / 2) * 0.2,
       z: 0.28 + Math.random() * 0.08,
-      rotY: (Math.random() - 0.5) * 0.25,
+      rotY: 0,
     })
   }
-  room.submissions.push({ playerId, cards, revealed: false, positions: pos })
+  const submission = {
+    id: `r${room.round}-s${room.nextSubmissionSeq || 0}`,
+    playerId,
+    cards,
+    revealed: false,
+    positions: pos,
+  }
+  room.nextSubmissionSeq = (room.nextSubmissionSeq || 0) + 1
+  room.submissions.push(submission)
   for (let i = 0; i < cards.length; i++) {
     room.tablePositions = room.tablePositions || []
     room.tablePositions.push({
-      key: `${playerId}:${i}:${cards[i]}`,
+      key: `${submission.id}:${i}`,
       x: pos[i].x,
       z: pos[i].z,
       rotY: pos[i].rotY,
     })
   }
   room.drag = null
-  const needed = Object.keys(room.players).filter((id) => id !== room.czarId).length
-  if (room.submissions.length >= needed) {
-    shuffle(room.submissions)
-    for (const s of room.submissions) s.revealed = true
-    room.phase = 'voting'
-  }
-  return touch(room)
+  touch(room)
+  return maybeStartVoting(room)
 }
 
 function resolveVotes(room) {
@@ -377,30 +507,35 @@ function resolveVotes(room) {
   if (best && room.players[best]) room.players[best].score += 1
   for (const s of room.submissions) room.discardWhite.push(...s.cards)
   room.phase = 'scoring'
+  room.phaseStartedAt = Date.now()
+  room.phaseEndsAt = room.phaseStartedAt + SCORE_SHOW_MS
   return touch(room)
 }
 
-function vote(room, voterId, submissionPlayerId) {
+function maybeResolveVotes(room) {
   if (room.phase !== 'voting') return room
-  if (!room.players[voterId]) return room
+  const eligible = eligibleVoterIds(room)
+  if (eligible.length && eligible.every((id) => room.votes?.[id])) {
+    return resolveVotes(room)
+  }
+  return room
+}
+
+function vote(room, voterId, submissionPlayerId) {
+  if (room.phase !== 'voting') throw new Error('Voting is not open')
+  if (!room.players[voterId]) throw new Error('Player not found')
+  if (!eligibleVoterIds(room).includes(voterId)) throw new Error('You cannot vote this round')
   if (!room.submissions.some((s) => s.playerId === submissionPlayerId)) {
     throw new Error('Invalid submission')
   }
   if (voterId === submissionPlayerId) throw new Error('Cannot vote for yourself')
   room.votes[voterId] = submissionPlayerId
-  const eligible = Object.keys(room.players).filter((id) => {
-    const onlySelf = room.submissions.length === 1 && room.submissions[0].playerId === id
-    return !onlySelf
-  })
-  if (eligible.filter((id) => room.votes[id]).length >= eligible.length) {
-    return resolveVotes(room)
-  }
-  return touch(room)
+  touch(room)
+  return maybeResolveVotes(room)
 }
 
 function nextRound(room) {
-  // Allow advancing from scoring (or stuck revealing) so the button always works
-  if (room.phase !== 'scoring' && room.phase !== 'revealing') return room
+  if (room.phase !== 'scoring') throw new Error('The round is not ready to advance')
   const scores = Object.values(room.players).map((p) => p.score)
   if (Math.max(...scores, 0) >= 5) {
     room.phase = 'ended'
@@ -412,9 +547,11 @@ function nextRound(room) {
 function runBots(room) {
   if (room.phase === 'playing') {
     const pick = room.blackCard?.pick || 1
-    // Stagger: only play one bot per runBots call so fly-in animations are visible
-    for (const p of Object.values(room.players)) {
+    // Fill every bot submission in one authoritative pass. Human actions then
+    // transition to voting immediately instead of depending on future polls.
+    for (const p of playerList(room)) {
       if (!p.isBot || p.id === room.czarId) continue
+      if (!currentRoundIds(room).includes(p.id)) continue
       if (room.submissions.some((s) => s.playerId === p.id)) continue
       if ((p.hand || []).length < pick) continue
       try {
@@ -426,30 +563,42 @@ function runBots(room) {
         }))
         playCards(room, p.id, p.hand.slice(0, pick), positions)
       } catch { /* ignore */ }
-      break
     }
   }
-  if (room.phase === 'voting') {
-    // One bot vote per tick so humans see their green confirmation before resolve
-    for (const p of Object.values(room.players)) {
+  if (
+    room.phase === 'voting' &&
+    Date.now() - (room.phaseStartedAt || 0) >= BOT_VOTE_DELAY_MS
+  ) {
+    for (const p of playerList(room)) {
       if (!p.isBot || room.votes[p.id]) continue
+      if (!eligibleVoterIds(room).includes(p.id)) continue
       const options = room.submissions.map((s) => s.playerId).filter((id) => id !== p.id)
       if (!options.length) continue
       try {
         vote(room, p.id, options[Math.floor(Math.random() * options.length)])
       } catch { /* ignore */ }
-      break
+      if (room.phase !== 'voting') break
     }
+  }
+  if (
+    room.phase === 'scoring' &&
+    room.phaseEndsAt &&
+    Date.now() >= room.phaseEndsAt
+  ) {
+    nextRound(room)
+    runBots(room)
   }
   return room
 }
 
 function applyAction(room, action) {
   const { type, playerId } = action
+  const revision = room.revision || 0
   switch (type) {
     case 'set_packs':
       if (playerId !== room.hostId) throw new Error('Only host')
-      if (room.phase === 'lobby') room.packIds = (action.packIds || []).slice(0, 40)
+      if (room.phase !== 'lobby') throw new Error('Packs can only change in the lobby')
+      room.packIds = (action.packIds || []).slice(0, 40)
       break
     case 'set_face': {
       const p = room.players[playerId]
@@ -458,6 +607,7 @@ function applyAction(room, action) {
     }
     case 'add_bot':
       if (playerId !== room.hostId) throw new Error('Only host')
+      if (room.phase !== 'lobby') throw new Error('Bots can only be added in the lobby')
       addBot(room)
       break
     case 'start':
@@ -481,29 +631,43 @@ function applyAction(room, action) {
       }
       break
     case 'drag_card':
-      room.drag = action.drag
-        ? { ...action.drag, playerId }
-        : null
+      {
+        room.dragSequences = room.dragSequences || {}
+        const lastSequence = room.dragSequences[playerId] || 0
+        const requestedSequence = Number(action.sequence)
+        const sequence = Number.isFinite(requestedSequence)
+          ? requestedSequence
+          : lastSequence + 1
+        if (sequence > lastSequence) {
+          room.dragSequences[playerId] = sequence
+          room.drag = action.drag
+            ? { ...action.drag, playerId }
+            : room.drag?.playerId === playerId
+              ? null
+              : room.drag
+        }
+      }
       break
     case 'move_table_card': {
+      if (room.phase !== 'playing') throw new Error('Played cards are locked')
       room.tablePositions = room.tablePositions || []
       const key = String(action.key || '')
       let hit = room.tablePositions.find((p) => p.key === key)
-      if (!hit) {
-        hit = { key, x: 0, z: 0.3, rotY: 0 }
-        room.tablePositions.push(hit)
-      }
-      hit.x = Number(action.x) || 0
-      hit.z = Number(action.z) || 0
-      if (action.rotY != null) hit.rotY = Number(action.rotY) || 0
-      // Mirror into submission positions when possible
+      if (!hit) throw new Error('Card position not found')
+      let owned = false
       for (const s of room.submissions || []) {
-        const idx = s.cards.findIndex((c, i) => `${s.playerId}:${i}:${c}` === key)
+        const idx = s.cards.findIndex((_, i) => `${s.id}:${i}` === key)
         if (idx >= 0) {
+          if (s.playerId !== playerId) throw new Error('You can only move your own play')
+          owned = true
+          hit.x = finiteOr(action.x, hit.x)
+          hit.z = finiteOr(action.z, hit.z)
+          hit.rotY = finiteOr(action.rotY, hit.rotY)
           s.positions = s.positions || []
           s.positions[idx] = { x: hit.x, z: hit.z, rotY: hit.rotY }
         }
       }
+      if (!owned) throw new Error('Card position not found')
       room.drag = null
       break
     }
@@ -517,17 +681,64 @@ function applyAction(room, action) {
       runBots(room)
       break
     case 'tick_bots':
+      {
+        const now = Date.now()
+        let presenceChanged = false
+        const current = room.players[playerId]
+        if (
+          current &&
+          (!current.connected ||
+            !current.lastSeenAt ||
+            now - current.lastSeenAt >= PRESENCE_HEARTBEAT_MS)
+        ) {
+          current.connected = true
+          current.lastSeenAt = now
+          presenceChanged = true
+        }
+        for (const player of Object.values(room.players)) {
+          if (
+            !player.isBot &&
+            player.id !== playerId &&
+            player.connected &&
+            player.lastSeenAt &&
+            now - player.lastSeenAt > PLAYER_TIMEOUT_MS
+          ) {
+            player.connected = false
+            presenceChanged = true
+          }
+        }
+        if (presenceChanged) {
+          if (!room.players[room.hostId]?.connected) {
+            const nextHost = playerList(room).find(
+              (player) => player.connected && !player.isBot,
+            )
+            if (nextHost) room.hostId = nextHost.id
+          }
+          touch(room)
+          maybeStartVoting(room)
+          maybeResolveVotes(room)
+        }
+      }
       runBots(room)
-      break
+      return room
     case 'leave': {
       const p = room.players[playerId]
-      if (p) p.connected = false
+      if (p) {
+        p.connected = false
+        p.lastSeenAt = Date.now()
+        if (room.hostId === playerId) {
+          const nextHost = playerList(room).find((candidate) => candidate.connected && !candidate.isBot)
+          if (nextHost) room.hostId = nextHost.id
+        }
+        maybeStartVoting(room)
+        maybeResolveVotes(room)
+      }
       break
     }
     default:
       throw new Error('Unknown action')
   }
-  return touch(room)
+  return (room.revision || 0) === revision ? touch(room) : room
 }
 
 // ---- persistence ----
@@ -545,33 +756,117 @@ export function storeMode() {
   return redis() ? 'redis' : 'memory'
 }
 
+function roomKey(code) {
+  return `peril:room:${code}`
+}
+
+function lockKey(code) {
+  return `peril:lock:${code}`
+}
+
 export async function saveRoom(room) {
   touch(room)
   g.__perilRooms.set(room.code, room)
   const r = redis()
-  if (r) await r.set(`peril:room:${room.code}`, room, { ex: ROOM_TTL_SEC })
+  if (r) await r.set(roomKey(room.code), room, { ex: ROOM_TTL_SEC })
   return room
 }
 
 export async function loadRoom(code) {
   const c = String(code || '').toUpperCase()
   if (!c) return null
-  if (g.__perilRooms.has(c)) return g.__perilRooms.get(c)
   const r = redis()
   if (r) {
-    const data = await r.get(`peril:room:${c}`)
+    // Redis is authoritative. Never serve the warm-instance cache first or one
+    // serverless instance can overwrite votes/actions written by another.
+    const data = await r.get(roomKey(c))
     if (data) {
       g.__perilRooms.set(c, data)
       return data
     }
+    return null
   }
-  return null
+  return g.__perilRooms.get(c) || null
+}
+
+async function releaseLock(r, key, token) {
+  await r.eval(
+    "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+    [key],
+    [token],
+  )
+}
+
+/**
+ * Serialize every room mutation when shared storage is enabled. This prevents
+ * simultaneous votes, joins, and card plays from replacing each other's state.
+ */
+export async function mutateRoom(code, updater) {
+  const c = String(code || '').toUpperCase()
+  if (!c) return null
+  const r = redis()
+  if (!r) {
+    const room = g.__perilRooms.get(c)
+    if (!room) return null
+    const revision = room.revision || 0
+    const value = await updater(room)
+    if ((room.revision || 0) !== revision) g.__perilRooms.set(c, room)
+    return { room, value }
+  }
+
+  const key = lockKey(c)
+  const token =
+    globalThis.crypto?.randomUUID?.() ||
+    `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  let acquired = false
+  for (let attempt = 0; attempt < ROOM_LOCK_RETRIES; attempt += 1) {
+    const result = await r.set(key, token, { nx: true, px: ROOM_LOCK_MS })
+    if (result) {
+      acquired = true
+      break
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20 + attempt * 5))
+  }
+  if (!acquired) throw new Error('Room is busy. Try again.')
+
+  try {
+    const room = await r.get(roomKey(c))
+    if (!room) return null
+    g.__perilRooms.set(c, room)
+    const revision = room.revision || 0
+    const value = await updater(room)
+    if ((room.revision || 0) !== revision) {
+      g.__perilRooms.set(c, room)
+      await r.set(roomKey(c), room, { ex: ROOM_TTL_SEC })
+    }
+    return { room, value }
+  } finally {
+    await releaseLock(r, key, token)
+  }
 }
 
 export async function createRoom(opts) {
   let code = (opts.code || randCode()).toUpperCase()
   let tries = 0
-  while (await loadRoom(code)) {
+  const r = redis()
+  if (r) {
+    while (tries <= 20) {
+      const room = blankRoom({ ...opts, code })
+      const result = await r.set(roomKey(code), room, {
+        nx: true,
+        ex: ROOM_TTL_SEC,
+      })
+      if (result) {
+        g.__perilRooms.set(code, room)
+        return room
+      }
+      code = randCode()
+      tries += 1
+    }
+    throw new Error('Could not allocate room code')
+  }
+
+  while (g.__perilRooms.has(code)) {
     code = randCode()
     if (++tries > 20) throw new Error('Could not allocate room code')
   }
@@ -587,5 +882,7 @@ export {
   joinRoom,
   applyAction,
   runBots,
+  activeRoundIds,
+  eligibleVoterIds,
   HAND_SIZE,
 }

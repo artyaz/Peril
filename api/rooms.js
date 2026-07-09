@@ -1,12 +1,12 @@
 import {
   createRoom,
-  loadRoom,
   saveRoom,
   joinRoom,
   stateFor,
   publicMeta,
   applyAction,
   storeMode,
+  mutateRoom,
 } from './_lib/engine.js'
 
 function cors(res) {
@@ -47,7 +47,13 @@ export default async function handler(req, res) {
 
   try {
     if (req.method === 'GET') {
-      return send(res, 200, { ok: true, store: storeMode(), service: 'peril' })
+      const store = storeMode()
+      return send(res, 200, {
+        ok: true,
+        store,
+        shared: store === 'redis',
+        service: 'peril',
+      })
     }
 
     if (req.method !== 'POST') {
@@ -57,8 +63,16 @@ export default async function handler(req, res) {
     const body = await readBody(req)
     const action = String(body.action || '')
     const ip = clientIp(req)
+    const store = storeMode()
 
     if (action === 'create') {
+      if (process.env.VERCEL && store !== 'redis') {
+        return send(res, 503, {
+          code: 'SHARED_STORE_REQUIRED',
+          error:
+            'Multiplayer storage is not configured. Connect Upstash Redis to this deployment, then try again.',
+        })
+      }
       const room = await createRoom({
         name: String(body.name || 'Untitled').slice(0, 40),
         hostId: String(body.hostId || ''),
@@ -75,28 +89,47 @@ export default async function handler(req, res) {
         })
         await saveRoom(room)
       }
-      return send(res, 200, { code: room.code, name: room.name, store: storeMode() })
+      return send(res, 200, {
+        code: room.code,
+        name: room.name,
+        store,
+        state: body.hostId ? stateFor(room, String(body.hostId)) : undefined,
+      })
     }
 
     if (action === 'join') {
       const code = String(body.code || body.roomCode || '').toUpperCase()
-      let room = await loadRoom(code)
-      if (!room && body.create) {
-        room = await createRoom({
+      let result = await mutateRoom(code, (room) => {
+        joinRoom(room, {
+          playerId: String(body.playerId),
+          name: String(body.name || 'Player'),
+          faceDataUrl: body.faceDataUrl,
+          ip,
+        })
+      })
+      if (!result && body.create) {
+        const room = await createRoom({
           name: body.roomName || 'Untitled',
           hostId: body.playerId,
           packIds: body.packIds || ['cah-base-set'],
           code,
         })
+        joinRoom(room, {
+          playerId: String(body.playerId),
+          name: String(body.name || 'Player'),
+          faceDataUrl: body.faceDataUrl,
+          ip,
+        })
+        await saveRoom(room)
+        result = { room }
       }
-      if (!room) return send(res, 404, { error: 'Room not found' })
-      joinRoom(room, {
-        playerId: String(body.playerId),
-        name: String(body.name || 'Player'),
-        faceDataUrl: body.faceDataUrl,
-        ip,
-      })
-      await saveRoom(room)
+      if (!result) {
+        return send(res, 404, {
+          code: 'ROOM_NOT_FOUND',
+          error: 'Room not found. Check the code or ask the host for a new invite.',
+        })
+      }
+      const room = result.room
       return send(res, 200, {
         joined: true,
         playerId: body.playerId,
@@ -108,12 +141,16 @@ export default async function handler(req, res) {
 
     if (action === 'state') {
       const code = String(body.code || body.roomCode || '').toUpperCase()
-      const room = await loadRoom(code)
-      if (!room) return send(res, 404, { error: 'Room not found' })
-      // Advance bot plays/votes between polls (staggered) so humans see feedback first
-      const before = room.updatedAt
-      applyAction(room, { type: 'tick_bots', playerId: String(body.playerId || '') })
-      if (room.updatedAt !== before) await saveRoom(room)
+      const result = await mutateRoom(code, (room) => {
+        applyAction(room, { type: 'tick_bots', playerId: String(body.playerId || '') })
+      })
+      if (!result) {
+        return send(res, 404, {
+          code: 'ROOM_NOT_FOUND',
+          error: 'This room expired or no longer exists.',
+        })
+      }
+      const room = result.room
       return send(res, 200, {
         state: stateFor(room, String(body.playerId || '')),
         meta: publicMeta(room),
@@ -122,14 +159,29 @@ export default async function handler(req, res) {
 
     if (action === 'act') {
       const code = String(body.code || body.roomCode || '').toUpperCase()
-      const room = await loadRoom(code)
-      if (!room) return send(res, 404, { error: 'Room not found' })
-      applyAction(room, {
-        ...body.payload,
-        type: body.payload?.type || body.type,
-        playerId: String(body.playerId),
+      const requestId = String(body.requestId || '').slice(0, 80)
+      const result = await mutateRoom(code, (room) => {
+        room.processedActions = Array.isArray(room.processedActions)
+          ? room.processedActions
+          : []
+        if (requestId && room.processedActions.includes(requestId)) return
+        applyAction(room, {
+          ...(body.payload || {}),
+          type: body.payload?.type || body.type,
+          playerId: String(body.playerId),
+        })
+        if (requestId) {
+          room.processedActions.push(requestId)
+          room.processedActions = room.processedActions.slice(-80)
+        }
       })
-      await saveRoom(room)
+      if (!result) {
+        return send(res, 404, {
+          code: 'ROOM_NOT_FOUND',
+          error: 'This room expired or no longer exists.',
+        })
+      }
+      const room = result.room
       return send(res, 200, { state: stateFor(room, String(body.playerId)) })
     }
 
