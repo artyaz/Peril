@@ -1,0 +1,11 @@
+/* Critical first-paint only — full theme loads with the app shell */
+:root {
+  --bg: #e8e8e6;
+  --ink: #2a2a28;
+}
+html, body, #app {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+}
