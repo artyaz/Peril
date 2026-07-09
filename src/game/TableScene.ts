@@ -96,10 +96,10 @@ export function createTableScene(): TableSceneApi {
   let knownSubKeys = new Set<string>()
   let flyingKeys = new Set<string>()
 
-  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.32, 1.15)
-  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.02, 0.55)
-  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 0.72, 1.15)
-  const tableCamTarget = new THREE.Vector3(0, TABLE_Y - 0.05, -0.15)
+  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.36, 1.35)
+  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.02, 0.62)
+  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 0.68, 1.05)
+  const tableCamTarget = new THREE.Vector3(0, TABLE_Y - 0.02, -0.12)
 
   function mount(el: HTMLElement) {
     root = el
@@ -381,22 +381,23 @@ export function createTableScene(): TableSceneApi {
     }
 
     const n = handCards.length
-    const spread = Math.min(0.085, 0.55 / Math.max(n, 1))
+    // Tight overlapping fan — cards can stack; hover peeks height only
+    const spread = Math.min(0.055, 0.38 / Math.max(n, 1))
     const start = -((n - 1) * spread) / 2
     handCards.forEach((card, i) => {
       if (card.userData.dragging) return
       const mid = (n - 1) / 2
       card.position.x = start + i * spread
-      card.position.z = 0.01 * Math.abs(i - mid)
+      card.position.z = 0.004 * Math.abs(i - mid)
       card.userData.baseY = 0
-      card.userData.baseRotX = -0.22
-      card.userData.baseRotY = (i - mid) * -0.028
-      card.userData.baseRotZ = (i - mid) * -0.014
+      card.userData.baseRotX = -0.2
+      card.userData.baseRotY = (i - mid) * -0.02
+      card.userData.baseRotZ = (i - mid) * -0.008
       card.rotation.x = card.userData.baseRotX
       card.rotation.y = card.userData.baseRotY
       card.rotation.z = card.userData.baseRotZ
     })
-    handGroup.position.set(0, TABLE_Y + 0.05, 0.78)
+    handGroup.position.set(0, TABLE_Y + 0.04, 0.92)
     void draggingText
   }
 
@@ -1216,7 +1217,7 @@ export function createTableScene(): TableSceneApi {
       const hovered = hoveredIndex === i && inHandZone
       const sel = selected.has(c.userData.cardText)
       // Peek: lift height only, minimal tilt
-      updateCardMotion(c, dt, hovered, sel, { lift: 0.09, tiltX: -0.04, tiltZ: 0.01 })
+      updateCardMotion(c, dt, hovered, sel, { lift: 0.085, tiltX: -0.02, tiltZ: 0.008 })
     })
 
     const inTableZone = lookClose || zoneFromPointer(pointerScreenY) === 'table'
