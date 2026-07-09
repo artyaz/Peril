@@ -20,23 +20,37 @@
   let hoverTimer: ReturnType<typeof setTimeout> | null = null
   let dragTimer: ReturnType<typeof setTimeout> | null = null
   let lastDragSent = 0
+  /** Optimistic vote while waiting for server */
+  let pendingVoteId = $state<string | null>(null)
+  let nextRoundBusy = $state(false)
 
   const phaseLabel = $derived(
     !room ? '…' :
     room.phase === 'lobby' ? 'Lobby' :
-    room.phase === 'playing' ? (room.czarId === session?.id ? 'You are Card Czar' : 'Play your cards') :
-    room.phase === 'voting' ? 'Vote for the funniest' :
+    room.phase === 'playing' ? (
+      room.czarId === session?.id
+        ? 'You are Card Czar'
+        : room.submissions?.some((s) => s.playerId === session?.id)
+          ? 'Waiting for others…'
+          : 'Play your cards'
+    ) :
+    room.phase === 'voting' ? (pendingVoteId || room.votes?.[session?.id || ''] ? 'Vote locked in' : 'Vote for the funniest') :
     room.phase === 'scoring' ? 'Round result' :
     room.phase === 'ended' ? 'Game over' :
     room.phase,
   )
 
-  const myVote = $derived(
-    room && session ? room.votes?.[session.id] ?? null : null,
-  )
+  const myVote = $derived.by(() => {
+    if (!room || !session) return null
+    return pendingVoteId || room.votes?.[session.id] || null
+  })
 
   const voteTargetName = $derived(
     myVote && room ? room.players.find((p) => p.id === myVote)?.name || 'a play' : null,
+  )
+
+  const iAlreadyPlayed = $derived(
+    !!room && !!session && !!room.submissions?.some((s) => s.playerId === session.id),
   )
 
   const voteProgress = $derived.by(() => {
@@ -84,7 +98,11 @@
         send({ type: 'drag_card', drag })
       }
       scene.onMoveTableCard = (key, x, z, rotY) => send({ type: 'move_table_card', key, x, z, rotY })
-      scene.onVote = (submissionPlayerId) => send({ type: 'vote', submissionPlayerId })
+      scene.onVote = (submissionPlayerId) => {
+        pendingVoteId = submissionPlayerId
+        error = ''
+        send({ type: 'vote', submissionPlayerId })
+      }
       if (room && session) scene.setState(room, session.id)
       connect()
     })
@@ -110,7 +128,16 @@
         if (msg.type === 'ip' && session) {
           saveSession({ ...session, lastIpHint: msg.ip })
         }
-        if (msg.type === 'error') error = msg.message
+        if (msg.type === 'error') {
+          error = msg.message
+          // Play/vote failures should clear optimistic UI
+          if (/vote|yourself|invalid submission/i.test(msg.message)) {
+            pendingVoteId = null
+          }
+          if (/play|card|already|czar/i.test(msg.message)) {
+            scene?.revertStagedPlays()
+          }
+        }
         if (msg.type === 'peer_hover') {
           scene?.setPeerHover(msg.playerId, msg.cardIndex, msg.cardText)
         }
@@ -119,6 +146,11 @@
         }
         if (msg.type === 'state') {
           room = msg.state
+          if (msg.state.phase !== 'voting') pendingVoteId = null
+          else if (session && msg.state.votes?.[session.id]) {
+            pendingVoteId = msg.state.votes[session.id]
+          }
+          if (msg.state.phase !== 'scoring') nextRoundBusy = false
           if (msg.state.phase === 'lobby') {
             navigate({ name: 'lobby', code: msg.state.code })
             return
@@ -126,7 +158,12 @@
           if (session) scene?.setState(msg.state, session.id)
         }
       },
-      onError: (m) => { error = m },
+      onError: (m) => {
+        error = m
+        if (/play|card|already|czar/i.test(m)) scene?.revertStagedPlays()
+        if (/vote/i.test(m)) pendingVoteId = null
+        if (/next/i.test(m)) nextRoundBusy = false
+      },
     })
   }
 
@@ -135,7 +172,14 @@
   }
 
   function nextRound() {
+    if (nextRoundBusy || room?.phase !== 'scoring') return
+    nextRoundBusy = true
+    error = ''
     send({ type: 'next_round' })
+    // Safety: unlock if state never arrives
+    setTimeout(() => {
+      if (room?.phase === 'scoring') nextRoundBusy = false
+    }, 2500)
   }
 
   function winnerName(id: string | null) {
@@ -188,23 +232,27 @@
       <div class="hint">
         {#if room.czarId === session?.id}
           You’re the Card Czar — wait while others play
+        {:else if iAlreadyPlayed}
+          Play locked in — waiting for others
         {:else if (room.blackCard?.pick || 1) > 1}
           Drag {(room.blackCard?.pick || 1)} cards onto the table
         {:else}
-          Drag a card onto the table to play
+          Drag one card onto the table to play
         {/if}
       </div>
-      <div class="hint-sub">Move the pointer up to look at the table</div>
+      {#if !iAlreadyPlayed && room.czarId !== session?.id}
+        <div class="hint-sub">Move the pointer up to look at the table</div>
+      {/if}
     </div>
   {/if}
 
   {#if room?.phase === 'voting'}
-    <div class="hint-stack fade-in vote-panel">
+    <div class="hint-stack fade-in vote-panel" class:voted-ok={!!myVote}>
       <div class="hint vote-title">
         {#if myVote}
-          You voted for {voteTargetName}
+          ✓ Voted for {voteTargetName}
         {:else}
-          Hover a play to highlight · click to vote
+          Click a white card to vote
         {/if}
       </div>
       <div class="hint-sub">
@@ -214,7 +262,7 @@
         {/if}
       </div>
       {#if myVote}
-        <div class="hint-sub soft">Click another play to change your vote</div>
+        <div class="hint-sub soft">Your pick is highlighted in green · click another to change</div>
       {/if}
     </div>
   {/if}
@@ -224,7 +272,18 @@
       <div class="banner-kicker">Most votes</div>
       <div class="banner-title">{winnerName(room.winnerId)} wins the round</div>
       <div class="banner-sub">+1 point · first to 5 wins the game</div>
-      <button class="primary" onclick={nextRound}>Next round</button>
+      <button
+        class="primary"
+        type="button"
+        disabled={nextRoundBusy}
+        onclick={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          nextRound()
+        }}
+      >
+        {nextRoundBusy ? 'Starting…' : 'Next round'}
+      </button>
     </div>
   {/if}
 
@@ -294,6 +353,13 @@
     background: rgba(250, 250, 248, 0.9);
     backdrop-filter: blur(10px);
     box-shadow: 0 12px 32px rgba(40, 40, 36, 0.12);
+  }
+  .hint-stack.vote-panel.voted-ok {
+    background: rgba(232, 245, 234, 0.94);
+    box-shadow: 0 12px 32px rgba(40, 100, 50, 0.12);
+  }
+  .hint-stack.vote-panel.voted-ok .vote-title {
+    color: #1f6b34;
   }
   .hint {
     color: var(--ink);
@@ -396,19 +462,28 @@
   }
   .banner {
     position: absolute;
-    z-index: 3;
+    z-index: 20;
     left: 50%;
     top: 42%;
     transform: translate(-50%, -50%);
     text-align: center;
     padding: 1.5rem 1.75rem;
     border-radius: 20px;
-    background: rgba(250, 250, 248, 0.88);
+    background: rgba(250, 250, 248, 0.94);
     backdrop-filter: blur(12px);
     box-shadow: 0 24px 60px rgba(40,40,36,.12);
     display: grid;
     gap: 0.55rem;
     justify-items: center;
+    pointer-events: auto;
+  }
+  .banner button {
+    pointer-events: auto;
+    min-width: 10rem;
+  }
+  .banner button:disabled {
+    opacity: 0.65;
+    cursor: wait;
   }
   .banner-kicker {
     font-size: 0.72rem;

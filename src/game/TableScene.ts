@@ -20,6 +20,8 @@ export type TableSceneApi = {
   setState: (state: RoomState, localPlayerId: string) => void
   setPeerHover: (playerId: string, cardIndex: number | null, cardText?: string | null) => void
   setPeerDrag: (drag: CardDrag | null) => void
+  /** Put staged/pending plays back into the hand after a rejected play */
+  revertStagedPlays: () => void
   onPlayCards: (cards: string[], positions: { x: number; z: number; rotY?: number }[]) => void
   onHoverCard: (index: number | null, text?: string | null) => void
   onDragCard: (drag: CardDrag | null) => void
@@ -48,6 +50,8 @@ type LocalDrag = {
   followZ: Spring
   /** Hand reorder: last slot we snapped into */
   reorderSlot?: number
+  /** Whether dropping on the table may submit a play */
+  canPlay?: boolean
 }
 
 const TABLE_Y = 1.55
@@ -124,8 +128,12 @@ export function createTableScene(): TableSceneApi {
   let peerDragState: CardDrag | null = null
   let knownSubKeys = new Set<string>()
   let flyingKeys = new Set<string>()
-  /** Staged local drops before submitting (for pick > 1) */
+  /** Staged local drops before submitting (for pick > 1) — kept until server confirms */
   let stagedPlays: { text: string; x: number; z: number; rotY: number; card: CardMesh }[] = []
+  /** True after we've sent play_cards and are waiting for the server submission */
+  let playSubmitPending = false
+  /** Optimistic local vote target while waiting for server ack */
+  let localVoteId: string | null = null
 
   // Hand overview stays roomy; table peek drops in close enough to read card text.
   const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.62, 1.28)
@@ -870,14 +878,23 @@ export function createTableScene(): TableSceneApi {
     })
 
     const identitySig = desired.map((d) => `${d.key}:${d.revealed}`).join(';')
+    const stagedCount = stagedPlays.length
+    const confirmedCount = tableCards.filter(
+      (c) => !c.userData.cardKey?.startsWith('local:'),
+    ).length
     const forceRebuild =
-      identitySig !== tableGroup.userData.subIdentitySig || tableCards.length !== desired.length
+      identitySig !== tableGroup.userData.subIdentitySig ||
+      (confirmedCount !== desired.length && stagedCount === 0)
 
     function findOptimisticMatch(d: (typeof desired)[0], pool: CardMesh[]): CardMesh | undefined {
-      const localKey = `local:${d.playerId}:0:${d.text}`
       let card = pool.find((c) => c.userData.cardKey === d.key)
       if (card) return card
-      card = pool.find((c) => c.userData.cardKey === localKey)
+      // Match any staged local key for this text (pick > 1 uses :0:, :1:, …)
+      card = pool.find(
+        (c) =>
+          !!c.userData.cardKey?.startsWith(`local:${d.playerId}:`) &&
+          c.userData.cardText === d.text,
+      )
       if (card) return card
       card = pool.find(
         (c) =>
@@ -895,12 +912,12 @@ export function createTableScene(): TableSceneApi {
         if (!card || card.userData.dragging) continue
         card.userData.selectable = state.phase === 'voting'
         card.userData.submissionPlayerId = d.playerId
-        const myVote = state.votes?.[localId]
+        const myVote = localVoteId || state.votes?.[localId]
         const isVoted = state.phase === 'voting' && myVote === d.playerId
         const isWinner =
           (state.phase === 'scoring' || state.phase === 'ended') &&
           state.winnerId === d.playerId
-        applyVoteGlow(card, isVoted, isWinner)
+        applyVoteGlow(card, isVoted, isWinner, false)
         const toY = TABLE_CARD_Y + d.subIndex * 0.002
         card.userData.baseY = toY
         // Don't snap pinned/local cards — players can throw them around
@@ -956,12 +973,12 @@ export function createTableScene(): TableSceneApi {
       card.userData.submissionPlayerId = d.playerId
       card.userData.index = d.subIndex
       card.userData.selectable = state.phase === 'voting'
-      const myVote = state.votes?.[localId]
+      const myVote = localVoteId || state.votes?.[localId]
       const isVoted = state.phase === 'voting' && myVote === d.playerId
       const isWinner =
         (state.phase === 'scoring' || state.phase === 'ended') &&
         state.winnerId === d.playerId
-      applyVoteGlow(card, isVoted, isWinner)
+      applyVoteGlow(card, isVoted, isWinner, false)
 
       const toY = TABLE_CARD_Y + d.subIndex * 0.002
       const draggingThis =
@@ -1038,8 +1055,18 @@ export function createTableScene(): TableSceneApi {
       newCards.push(card)
     }
 
+    // Keep staged local plays that the server hasn't confirmed yet
+    for (const staged of stagedPlays) {
+      if (!newCards.includes(staged.card) && staged.card.parent === tableGroup) {
+        used.add(staged.card)
+        newCards.push(staged.card)
+      }
+    }
+
     for (const old of tableCards) {
       if (!used.has(old) && !newCards.includes(old)) {
+        // Never dispose a card we're still staging
+        if (stagedPlays.some((s) => s.card === old)) continue
         tableGroup.remove(old)
         disposeCardMesh(old)
       }
@@ -1055,11 +1082,12 @@ export function createTableScene(): TableSceneApi {
     let emissive = '#000000'
     let intensity = 0
     if (winner) {
-      emissive = '#3a5a32'
-      intensity = 0.38
+      emissive = '#2f6b38'
+      intensity = 0.48
     } else if (voted) {
-      emissive = '#2a4a6a'
-      intensity = 0.32
+      // Clear green confirmation for the play you voted for
+      emissive = '#2f8a44'
+      intensity = 0.55
     } else if (hovered) {
       emissive = '#c8a84a'
       intensity = 0.42
@@ -1175,7 +1203,9 @@ export function createTableScene(): TableSceneApi {
     if (!hit) return
 
     if (localDrag.source === 'hand') {
-      if (zone === 'table' || lookClose) {
+      // Reorder-only drags stay in the hand — never cross onto the table
+      const allowTable = !!localDrag.canPlay
+      if (allowTable && (zone === 'table' || lookClose)) {
         if (localDrag.card.parent !== tableGroup && tableGroup) {
           const w = new THREE.Vector3()
           localDrag.card.getWorldPosition(w)
@@ -1263,6 +1293,22 @@ export function createTableScene(): TableSceneApi {
 
   function endHandDragPlay() {
     if (!localDrag || localDrag.source !== 'hand' || !tableGroup) return
+    // Enforce one play per round — extra drops snap back to hand
+    if (
+      room?.phase !== 'playing' ||
+      room.czarId === localId ||
+      playSubmitPending ||
+      room.submissions?.some((s) => s.playerId === localId)
+    ) {
+      endHandDragCancel()
+      return
+    }
+    const pick = room?.blackCard?.pick || 1
+    if (stagedPlays.length >= pick) {
+      endHandDragCancel()
+      return
+    }
+
     const card = localDrag.card
     const text = localDrag.cardText
     let x = card.position.x
@@ -1277,7 +1323,6 @@ export function createTableScene(): TableSceneApi {
     const raw = clampToTable(x, z)
     const c = resolveDropAgainstTable(card, raw.x, raw.z)
     const rotY = localDrag.rotY
-    const pick = room?.blackCard?.pick || 1
     const stageIndex = stagedPlays.length
 
     // Same mesh continues onto the table — no recreate
@@ -1309,11 +1354,11 @@ export function createTableScene(): TableSceneApi {
     localDrag = null
     dragCb(null)
 
-    // Only submit when we've staged the full pick count — avoids "Play exactly N" errors
+    // Only submit when we've staged the full pick count — keeps staging until ack
     if (stagedPlays.length >= pick) {
       const cards = stagedPlays.map((s) => s.text)
       const positions = stagedPlays.map((s) => ({ x: s.x, z: s.z, rotY: s.rotY }))
-      stagedPlays = []
+      playSubmitPending = true
       playCb(cards, positions)
     }
   }
@@ -1356,6 +1401,12 @@ export function createTableScene(): TableSceneApi {
       if (hits.length) {
         const card = cardFromIntersect(hits[0].object)
         if (!card) return
+        const pick = room.blackCard?.pick || 1
+        const canThrow =
+          room.czarId !== localId &&
+          !playSubmitPending &&
+          !room.submissions?.some((s) => s.playerId === localId) &&
+          stagedPlays.length < pick
         card.userData.dragging = true
         localDrag = {
           source: 'hand',
@@ -1367,11 +1418,12 @@ export function createTableScene(): TableSceneApi {
           startX: ev.clientX,
           startY: ev.clientY,
           moved: false,
-          rotY: (Math.random() - 0.5) * 0.18,
+          // Mark non-throwable drags so pointer-up always cancels to hand
+          rotY: canThrow ? (Math.random() - 0.5) * 0.18 : 0,
           ...makeDragSprings(card.position.x, card.position.y + 0.04, card.position.z),
         }
+        localDrag.canPlay = canThrow
         localDrag.followY.center = card.position.y + 0.04
-        // Bring dragged card to front of render order
         card.renderOrder = 5
         setHover(null)
         try {
@@ -1380,7 +1432,7 @@ export function createTableScene(): TableSceneApi {
           /* ignore */
         }
         updateLocalDragPosition()
-        broadcastDrag(performance.now() + DRAG_BROADCAST_MS)
+        if (canThrow) broadcastDrag(performance.now() + DRAG_BROADCAST_MS)
         ev.preventDefault()
         return
       }
@@ -1400,24 +1452,12 @@ export function createTableScene(): TableSceneApi {
         if (!card) return
         const key = card.userData.cardKey as string | undefined
         if (room.phase === 'voting') {
-          // Potential click-vote; becomes rearrange if moved past CLICK_MOVE_PX
-          if (!key) card.userData.cardKey = `loose:${card.userData.submissionPlayerId || 'x'}:${card.userData.index}`
-          localDrag = {
-            source: 'table',
-            card,
-            cardText: card.userData.cardText,
-            cardKey: card.userData.cardKey,
-            pointerId: ev.pointerId,
-            startX: ev.clientX,
-            startY: ev.clientY,
-            moved: false,
-            rotY: card.userData.baseRotY || 0,
-            ...makeDragSprings(card.position.x, card.position.y, card.position.z),
-          }
-          try {
-            ;(ev.currentTarget as HTMLElement).setPointerCapture?.(ev.pointerId)
-          } catch {
-            /* ignore */
+          // Voting is click-only — no rearrange, so votes aren't lost to micro-drags
+          const pid = card.userData.submissionPlayerId
+          if (pid && pid !== 'hidden' && pid !== localId) {
+            localVoteId = pid
+            applyVoteGlow(card, true, false, false)
+            voteCb(pid)
           }
           ev.preventDefault()
           return
@@ -1527,26 +1567,14 @@ export function createTableScene(): TableSceneApi {
     updatePointerFromEvent(ev)
     const zone = lookClose ? 'table' : zoneFromPointer(pointerScreenY)
 
-    if (room?.phase === 'voting' && localDrag.source === 'table') {
-      const card = localDrag.card
-      const wasClick = !localDrag.moved
-      if (wasClick) {
-        localDrag = null
-        dragCb(null)
-        const pid = card.userData.submissionPlayerId
-        if (pid && pid !== 'hidden' && pid !== localId) voteCb(pid)
-      } else if (card.userData.dragging || localDrag.moved) {
-        endTableDrag()
-      } else {
-        localDrag = null
-        dragCb(null)
-      }
-      return
-    }
-
     if (localDrag.source === 'hand') {
       const canPlay =
-        room?.phase === 'playing' && room.czarId !== localId && (zone === 'table' || lookClose)
+        !!localDrag.canPlay &&
+        room?.phase === 'playing' &&
+        room.czarId !== localId &&
+        !playSubmitPending &&
+        !room.submissions?.some((s) => s.playerId === localId) &&
+        (zone === 'table' || lookClose)
       if (canPlay) endHandDragPlay()
       else endHandDragCancel()
       return
@@ -1584,26 +1612,42 @@ export function createTableScene(): TableSceneApi {
     }
     syncAvatars(state, localPlayerId)
     syncBlack(state)
-    syncSubmissions(state)
-    // Clear staging when our submission is confirmed or round changes
+
+    const serverHasMyPlay = !!state.submissions?.some((s) => s.playerId === localPlayerId)
+    // Keep staged cards until the server confirms our submission (prevents bounce-back)
     if (state.phase !== 'playing') {
       stagedPlays = []
-    } else if (state.submissions?.some((s) => s.playerId === localPlayerId)) {
+      playSubmitPending = false
+    } else if (serverHasMyPlay) {
       stagedPlays = []
+      playSubmitPending = false
     }
+
+    // Sync optimistic vote with server
+    if (state.phase !== 'voting') {
+      localVoteId = null
+    } else if (state.votes?.[localPlayerId]) {
+      localVoteId = state.votes[localPlayerId]
+    }
+
+    syncSubmissions(state)
+
     const rawHand = state.you?.hand || []
     const optimisticPlayed = new Map<string, number>()
     for (const s of stagedPlays) {
       optimisticPlayed.set(s.text, (optimisticPlayed.get(s.text) || 0) + 1)
     }
-    for (const c of tableCards) {
-      if (
-        c.userData.cardKey?.startsWith(`local:${localPlayerId}:`) ||
-        (c.userData.pinned && c.userData.submissionPlayerId === localPlayerId)
-      ) {
-        const t = c.userData.cardText
-        if (t && t !== '???') {
-          optimisticPlayed.set(t, (optimisticPlayed.get(t) || 0) + 1)
+    // Only count local table cards while still staging / pending ack
+    if (!serverHasMyPlay) {
+      for (const c of tableCards) {
+        if (
+          c.userData.cardKey?.startsWith(`local:${localPlayerId}:`) ||
+          (c.userData.pinned && c.userData.submissionPlayerId === localPlayerId)
+        ) {
+          const t = c.userData.cardText
+          if (t && t !== '???') {
+            optimisticPlayed.set(t, (optimisticPlayed.get(t) || 0) + 1)
+          }
         }
       }
     }
@@ -1625,6 +1669,35 @@ export function createTableScene(): TableSceneApi {
     } else if (!localDrag) {
       applyGhost(state.drag?.playerId === localPlayerId ? null : state.drag ?? null)
     }
+  }
+
+  function revertStagedPlays() {
+    if (!handGroup || !stagedPlays.length) {
+      playSubmitPending = false
+      return
+    }
+    const texts = stagedPlays.map((s) => s.text)
+    for (const s of stagedPlays) {
+      tableGroup?.remove(s.card)
+      tableCards = tableCards.filter((c) => c !== s.card)
+      s.card.userData.dragging = false
+      s.card.userData.pinned = false
+      s.card.userData.cardKey = undefined
+      s.card.userData.submissionPlayerId = undefined
+      s.card.scale.setScalar(1)
+      handGroup.add(s.card)
+      if (!handCards.includes(s.card)) handCards.push(s.card)
+    }
+    stagedPlays = []
+    playSubmitPending = false
+    // Rebuild hand including restored cards
+    const merged = [...(room?.you?.hand || [])]
+    for (const t of texts) {
+      // ensure restored texts appear even if server already removed them optimistically
+      if (!merged.includes(t)) merged.push(t)
+    }
+    // Prefer current handCards order + restored
+    layoutHand(handCards.map((c) => c.userData.cardText))
   }
 
   function setPeerHover(playerId: string, cardIndex: number | null, cardText?: string | null) {
@@ -1719,19 +1792,19 @@ export function createTableScene(): TableSceneApi {
 
     const inTableZone = lookClose || zoneFromPointer(pointerScreenY) === 'table'
     const voting = room?.phase === 'voting'
+    const myVoteTarget = localVoteId || (localId ? room?.votes?.[localId] : null) || null
     tableCards.forEach((c) => {
       if (c.userData.dragging) return
       const hovered = inTableZone && hoveredTableCard === c
-      const voted =
-        voting && localId && room?.votes?.[localId] === c.userData.submissionPlayerId
+      const voted = voting && !!myVoteTarget && myVoteTarget === c.userData.submissionPlayerId
       const isWinner =
         (room?.phase === 'scoring' || room?.phase === 'ended') &&
         room?.winnerId === c.userData.submissionPlayerId
       if (voting || isWinner) {
-        applyVoteGlow(c, !!voted, !!isWinner, hovered && voting)
+        applyVoteGlow(c, !!voted, !!isWinner, hovered && voting && !voted)
       }
       updateCardMotion(c, dt, hovered || !!voted, false, {
-        lift: voting ? (hovered ? 0.055 : voted ? 0.032 : 0.01) : hovered ? 0.032 : 0.012,
+        lift: voting ? (voted ? 0.04 : hovered ? 0.055 : 0.01) : hovered ? 0.032 : 0.012,
         tiltX: 0,
       })
       c.rotation.x = c.userData.baseRotX
@@ -1781,6 +1854,7 @@ export function createTableScene(): TableSceneApi {
     setState,
     setPeerHover,
     setPeerDrag,
+    revertStagedPlays,
     lookCloser,
     resize,
     get onPlayCards() {

@@ -399,7 +399,8 @@ function vote(room, voterId, submissionPlayerId) {
 }
 
 function nextRound(room) {
-  if (room.phase !== 'scoring') return room
+  // Allow advancing from scoring (or stuck revealing) so the button always works
+  if (room.phase !== 'scoring' && room.phase !== 'revealing') return room
   const scores = Object.values(room.players).map((p) => p.score)
   if (Math.max(...scores, 0) >= 5) {
     room.phase = 'ended'

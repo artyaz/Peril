@@ -493,7 +493,8 @@ class Room {
   }
 
   nextRound() {
-    if (this.phase !== 'scoring') return
+    // Allow advancing from scoring (or stuck revealing) so the button always works
+    if (this.phase !== 'scoring' && this.phase !== 'revealing') return
     const scores = [...this.players.values()].map((p) => p.score)
     if (Math.max(...scores, 0) >= 5) {
       this.phase = 'ended'
