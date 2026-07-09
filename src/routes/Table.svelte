@@ -18,6 +18,8 @@
   let scene: TableSceneApi | null = null
   let transport: RoomTransport | null = null
   let hoverTimer: ReturnType<typeof setTimeout> | null = null
+  let dragTimer: ReturnType<typeof setTimeout> | null = null
+  let lastDragSent = 0
 
   const phaseLabel = $derived(
     !room ? '…' :
@@ -41,7 +43,7 @@
     void import('../game/TableScene').then((mod) => {
       scene = mod.createTableScene()
       if (canvasHost) scene.mount(canvasHost)
-      scene.onPlayCards = (cards) => send({ type: 'play_cards', cards })
+      scene.onPlayCards = (cards, positions) => send({ type: 'play_cards', cards, positions })
       scene.onHoverCard = (index, text) => {
         if (hoverTimer) clearTimeout(hoverTimer)
         hoverTimer = setTimeout(() => send({
@@ -50,6 +52,20 @@
           cardText: text ?? null,
         }), 40)
       }
+      scene.onDragCard = (drag) => {
+        const now = performance.now()
+        if (drag && now - lastDragSent < 45) {
+          if (dragTimer) clearTimeout(dragTimer)
+          dragTimer = setTimeout(() => {
+            lastDragSent = performance.now()
+            send({ type: 'drag_card', drag })
+          }, 45)
+          return
+        }
+        lastDragSent = now
+        send({ type: 'drag_card', drag })
+      }
+      scene.onMoveTableCard = (key, x, z, rotY) => send({ type: 'move_table_card', key, x, z, rotY })
       scene.onVote = (submissionPlayerId) => send({ type: 'vote', submissionPlayerId })
       if (room && session) scene.setState(room, session.id)
       connect()
@@ -62,6 +78,7 @@
     transport?.close()
     scene?.unmount()
     if (hoverTimer) clearTimeout(hoverTimer)
+    if (dragTimer) clearTimeout(dragTimer)
   })
 
   function connect() {
@@ -78,6 +95,9 @@
         if (msg.type === 'error') error = msg.message
         if (msg.type === 'peer_hover') {
           scene?.setPeerHover(msg.playerId, msg.cardIndex, msg.cardText)
+        }
+        if (msg.type === 'peer_drag') {
+          scene?.setPeerDrag(msg.drag)
         }
         if (msg.type === 'state') {
           room = msg.state
@@ -138,11 +158,11 @@
   </aside>
 
   {#if room?.phase === 'playing'}
-    <div class="hint">{room.czarId === session?.id ? 'Waiting for plays…' : 'Bottom: your cards · top: look at the table'}</div>
+    <div class="hint">{room.czarId === session?.id ? 'Waiting for plays…' : 'Pull a card up to the table, then drop it'}</div>
   {/if}
 
   {#if room?.phase === 'voting'}
-    <div class="hint">Move up to the table · click a play to vote</div>
+    <div class="hint">Drag cards around · click a play to vote</div>
   {/if}
 
   {#if room?.phase === 'scoring'}

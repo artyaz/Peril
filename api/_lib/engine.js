@@ -86,6 +86,8 @@ function blankRoom({ code, name, hostId, packIds, maxPlayers }) {
     round: 0,
     hover: {},
     hoverText: {},
+    drag: null,
+    tablePositions: [],
     updatedAt: Date.now(),
   }
 }
@@ -137,6 +139,8 @@ function stateFor(room, viewerId) {
     round: room.round,
     hover: room.hover || {},
     hoverText: room.hoverText || {},
+    drag: room.drag || null,
+    tablePositions: room.tablePositions || [],
     you: you ? { hand: you.hand || [], selected: you.selected || [] } : undefined,
     updatedAt: room.updatedAt,
   }
@@ -268,9 +272,17 @@ function beginRound(room) {
   room.winnerId = null
   room.hover = {}
   room.hoverText = {}
+  room.drag = null
+  room.tablePositions = []
   for (const p of Object.values(room.players)) p.selected = []
   const players = playerList(room)
-  room.czarId = players[(room.round - 1) % players.length].id
+  // Round 1: prefer a bot czar so the human can test putting cards down
+  if (room.round === 1) {
+    const bot = players.find((p) => p.isBot)
+    room.czarId = (bot || players[0]).id
+  } else {
+    room.czarId = players[(room.round - 1) % players.length].id
+  }
   room.blackCard = room.blackDeck.length
     ? room.blackDeck.pop()
     : { text: "_ is the reason we can't have nice things.", pick: 1 }
@@ -299,7 +311,7 @@ function startGame(room) {
   return beginRound(room)
 }
 
-function playCards(room, playerId, cards) {
+function playCards(room, playerId, cards, positions) {
   if (room.phase !== 'playing') return room
   if (playerId === room.czarId) throw new Error('Card Czar waits')
   const player = room.players[playerId]
@@ -313,7 +325,30 @@ function playCards(room, playerId, cards) {
     if (i >= 0) player.hand.splice(i, 1)
   }
   player.selected = cards
-  room.submissions.push({ playerId, cards, revealed: false })
+  const pos = (positions || []).slice(0, cards.length).map((p, i) => ({
+    x: Number(p?.x) || (i - (cards.length - 1) / 2) * 0.2,
+    z: Number(p?.z) || 0.28,
+    rotY: Number(p?.rotY) || (Math.random() - 0.5) * 0.25,
+  }))
+  while (pos.length < cards.length) {
+    const i = pos.length
+    pos.push({
+      x: (i - (cards.length - 1) / 2) * 0.2,
+      z: 0.28 + Math.random() * 0.08,
+      rotY: (Math.random() - 0.5) * 0.25,
+    })
+  }
+  room.submissions.push({ playerId, cards, revealed: false, positions: pos })
+  for (let i = 0; i < cards.length; i++) {
+    room.tablePositions = room.tablePositions || []
+    room.tablePositions.push({
+      key: `${playerId}:${i}:${cards[i]}`,
+      x: pos[i].x,
+      z: pos[i].z,
+      rotY: pos[i].rotY,
+    })
+  }
+  room.drag = null
   const needed = Object.keys(room.players).filter((id) => id !== room.czarId).length
   if (room.submissions.length >= needed) {
     shuffle(room.submissions)
@@ -376,13 +411,21 @@ function nextRound(room) {
 function runBots(room) {
   if (room.phase === 'playing') {
     const pick = room.blackCard?.pick || 1
+    // Stagger: only play one bot per runBots call so fly-in animations are visible
     for (const p of Object.values(room.players)) {
       if (!p.isBot || p.id === room.czarId) continue
       if (room.submissions.some((s) => s.playerId === p.id)) continue
       if ((p.hand || []).length < pick) continue
       try {
-        playCards(room, p.id, p.hand.slice(0, pick))
+        const seat = p.seat || 0
+        const positions = Array.from({ length: pick }, (_, i) => ({
+          x: Math.sin(seat * 1.7 + i) * 0.45 + (i - (pick - 1) / 2) * 0.16,
+          z: 0.22 + Math.cos(seat * 1.3) * 0.2 + i * 0.04,
+          rotY: (Math.sin(seat * 3 + i) * 0.5) * 0.35,
+        }))
+        playCards(room, p.id, p.hand.slice(0, pick), positions)
       } catch { /* ignore */ }
+      break
     }
   }
   if (room.phase === 'voting') {
@@ -420,7 +463,7 @@ function applyAction(room, action) {
       runBots(room)
       break
     case 'play_cards':
-      playCards(room, playerId, action.cards)
+      playCards(room, playerId, action.cards, action.positions)
       runBots(room)
       break
     case 'hover_card':
@@ -434,6 +477,33 @@ function applyAction(room, action) {
         room.hoverText[playerId] = hand[action.cardIndex] || null
       }
       break
+    case 'drag_card':
+      room.drag = action.drag
+        ? { ...action.drag, playerId }
+        : null
+      break
+    case 'move_table_card': {
+      room.tablePositions = room.tablePositions || []
+      const key = String(action.key || '')
+      let hit = room.tablePositions.find((p) => p.key === key)
+      if (!hit) {
+        hit = { key, x: 0, z: 0.3, rotY: 0 }
+        room.tablePositions.push(hit)
+      }
+      hit.x = Number(action.x) || 0
+      hit.z = Number(action.z) || 0
+      if (action.rotY != null) hit.rotY = Number(action.rotY) || 0
+      // Mirror into submission positions when possible
+      for (const s of room.submissions || []) {
+        const idx = s.cards.findIndex((c, i) => `${s.playerId}:${i}:${c}` === key)
+        if (idx >= 0) {
+          s.positions = s.positions || []
+          s.positions[idx] = { x: hit.x, z: hit.z, rotY: hit.rotY }
+        }
+      }
+      room.drag = null
+      break
+    }
     case 'vote':
       vote(room, playerId, action.submissionPlayerId)
       runBots(room)

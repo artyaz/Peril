@@ -70,6 +70,8 @@ class Room {
     this.round = 0
     this.hover = {} // playerId -> cardIndex|null
     this.hoverText = {} // playerId -> peeked card text|null
+    this.drag = null
+    this.tablePositions = []
   }
 
   publicMeta() {
@@ -135,6 +137,8 @@ class Room {
       round: this.round,
       hover: this.hover || {},
       hoverText: this.hoverText || {},
+      drag: this.drag || null,
+      tablePositions: this.tablePositions || [],
       you: you
         ? { hand: you.hand, selected: you.selected }
         : undefined,
@@ -280,7 +284,40 @@ class Room {
         if (this.submissions.some((s) => s.playerId === p.id)) continue
         if (p.hand.length < pick) continue
         const cards = p.hand.slice(0, pick)
-        try { this.playCards(p.id, cards) } catch { /* ignore */ }
+        const seat = p.seat || 0
+        const positions = Array.from({ length: pick }, (_, i) => ({
+          x: Math.sin(seat * 1.7 + i) * 0.45 + (i - (pick - 1) / 2) * 0.16,
+          z: 0.22 + Math.cos(seat * 1.3) * 0.2 + i * 0.04,
+          rotY: (Math.sin(seat * 3 + i) * 0.5) * 0.35,
+        }))
+        // Broadcast a hardcoded drag path so peers see the card leave the hand
+        const from = positions[0]
+        this.drag = {
+          playerId: p.id,
+          cardText: cards[0],
+          source: 'hand',
+          x: from.x * 0.2,
+          z: from.z - 0.5,
+          y: 1.9,
+        }
+        this.broadcast()
+        const room = this
+        setTimeout(() => {
+          room.drag = {
+            playerId: p.id,
+            cardText: cards[0],
+            source: 'hand',
+            x: from.x,
+            z: from.z,
+            y: 1.7,
+          }
+          room.broadcast()
+        }, 280)
+        setTimeout(() => {
+          try { room.playCards(p.id, cards, positions) } catch { /* ignore */ }
+          setTimeout(() => room.runBots(), 450)
+        }, 700)
+        return
       }
     }
     if (this.phase === 'voting') {
@@ -321,11 +358,18 @@ class Room {
     this.winnerId = null
     this.hover = {}
     this.hoverText = {}
+    this.drag = null
+    this.tablePositions = []
     for (const p of this.players.values()) p.selected = []
 
     const players = [...this.players.values()].sort((a, b) => a.seat - b.seat)
-    const idx = (this.round - 1) % players.length
-    this.czarId = players[idx].id
+    // Round 1: prefer a bot czar so the human can test putting cards down
+    if (this.round === 1) {
+      const bot = players.find((p) => p.isBot)
+      this.czarId = (bot || players[0]).id
+    } else {
+      this.czarId = players[(this.round - 1) % players.length].id
+    }
     this.blackCard = this.blackDeck.length
       ? this.blackDeck.pop()
       : { text: '_ is the reason we can\'t have nice things.', pick: 1 }
@@ -334,7 +378,7 @@ class Room {
     this.broadcast()
   }
 
-  playCards(playerId, cards) {
+  playCards(playerId, cards, positions) {
     if (this.phase !== 'playing') return
     if (playerId === this.czarId) throw new Error('Card Czar waits')
     const player = this.players.get(playerId)
@@ -345,20 +389,40 @@ class Room {
     for (const c of cards) {
       if (!player.hand.includes(c)) throw new Error('Card not in hand')
     }
-    // remove from hand
     for (const c of cards) {
       const i = player.hand.indexOf(c)
       if (i >= 0) player.hand.splice(i, 1)
     }
     player.selected = cards
-    this.submissions.push({ playerId, cards, revealed: false })
+    const pos = (positions || []).slice(0, cards.length).map((p, i) => ({
+      x: Number(p?.x) || (i - (cards.length - 1) / 2) * 0.2,
+      z: Number(p?.z) || 0.28,
+      rotY: Number(p?.rotY) || (Math.random() - 0.5) * 0.25,
+    }))
+    while (pos.length < cards.length) {
+      const i = pos.length
+      pos.push({
+        x: (i - (cards.length - 1) / 2) * 0.2,
+        z: 0.28 + Math.random() * 0.08,
+        rotY: (Math.random() - 0.5) * 0.25,
+      })
+    }
+    this.submissions.push({ playerId, cards, revealed: false, positions: pos })
+    this.tablePositions = this.tablePositions || []
+    for (let i = 0; i < cards.length; i++) {
+      this.tablePositions.push({
+        key: `${playerId}:${i}:${cards[i]}`,
+        x: pos[i].x,
+        z: pos[i].z,
+        rotY: pos[i].rotY,
+      })
+    }
+    this.drag = null
 
     const needed = [...this.players.keys()].filter((id) => id !== this.czarId).length
     if (this.submissions.length >= needed) {
       this.phase = 'revealing'
-      // shuffle submissions for anonymity
       shuffle(this.submissions)
-      // reveal with staggered flag — all revealed for simplicity after short delay handled client-side
       for (const s of this.submissions) s.revealed = true
       this.phase = 'voting'
     }
@@ -523,7 +587,7 @@ function attachClient(ws, ip) {
           setTimeout(() => room.runBots(), 1400)
           break
         case 'play_cards':
-          room.playCards(playerId, msg.cards)
+          room.playCards(playerId, msg.cards, msg.positions)
           setTimeout(() => room.runBots(), 500)
           break
         case 'hover_card': {
@@ -543,6 +607,38 @@ function attachClient(ws, ip) {
               }))
             }
           }
+          break
+        }
+        case 'drag_card':
+          room.drag = msg.drag ? { ...msg.drag, playerId } : null
+          room.broadcast()
+          for (const [id, sock] of room.sockets) {
+            if (id === playerId) continue
+            if (sock.readyState === WebSocket.OPEN) {
+              sock.send(JSON.stringify({ type: 'peer_drag', drag: room.drag }))
+            }
+          }
+          break
+        case 'move_table_card': {
+          room.tablePositions = room.tablePositions || []
+          const key = String(msg.key || '')
+          let hit = room.tablePositions.find((p) => p.key === key)
+          if (!hit) {
+            hit = { key, x: 0, z: 0.3, rotY: 0 }
+            room.tablePositions.push(hit)
+          }
+          hit.x = Number(msg.x) || 0
+          hit.z = Number(msg.z) || 0
+          if (msg.rotY != null) hit.rotY = Number(msg.rotY) || 0
+          for (const s of room.submissions || []) {
+            const idx = s.cards.findIndex((c, i) => `${s.playerId}:${i}:${c}` === key)
+            if (idx >= 0) {
+              s.positions = s.positions || []
+              s.positions[idx] = { x: hit.x, z: hit.z, rotY: hit.rotY }
+            }
+          }
+          room.drag = null
+          room.broadcast()
           break
         }
         case 'vote':
