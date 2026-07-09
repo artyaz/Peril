@@ -2,8 +2,8 @@ import * as THREE from 'three'
 import { Spring } from '../lib/motion'
 
 /** Readable thin cards — slight overlap in hand; peek lifts on hover. */
-export const CARD_W = 0.1
-export const CARD_H = 0.14
+export const CARD_W = 0.092
+export const CARD_H = 0.128
 export const CARD_D = 0.0018
 /** Table surface is a 0.05-tall cylinder centered at y=0 → top at 0.025. */
 export const TABLE_SURFACE_TOP = 0.025

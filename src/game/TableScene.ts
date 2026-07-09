@@ -53,15 +53,15 @@ const HAND_ZONE_Y = 0.58
 const DRAG_BROADCAST_MS = 40
 const CLICK_MOVE_PX = 6
 /** Feet Y — keep heads + name pills inside the upper frame. */
-const AVATAR_SIT_Y = TABLE_Y - 0.48
+const AVATAR_SIT_Y = TABLE_Y - 0.55
 const DRAG_STIFF = 420
 const DRAG_DAMP = 34
 /** Local hand lives in camera space so framing never clips. */
 const HAND_CAM_X = 0
-const HAND_CAM_Y = -0.08
-const HAND_CAM_Z = -0.42
-const FOV_HAND = 64
-const FOV_TABLE = 55
+const HAND_CAM_Y = 0.02
+const HAND_CAM_Z = -0.38
+const FOV_HAND = 68
+const FOV_TABLE = 58
 
 export function createTableScene(): TableSceneApi {
   let threeRenderer: THREE.WebGLRenderer | null = null
@@ -119,11 +119,11 @@ export function createTableScene(): TableSceneApi {
   /** Staged local drops before submitting (for pick > 1) */
   let stagedPlays: { text: string; x: number; z: number; rotY: number; card: CardMesh }[] = []
 
-  // Table overview: high enough to see heads/names; hand is camera-locked separately.
-  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.55, 1.2)
-  const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.02, 0.15)
-  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 1.25, 1.05)
-  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + 0.02, -0.08)
+  // Pulled back so heads/names clear the top and the table isn't in your face.
+  const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.62, 1.35)
+  const handCamTarget = new THREE.Vector3(0, TABLE_Y - 0.02, 0.1)
+  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 1.35, 1.25)
+  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + 0.02, -0.1)
 
   function ensureHitbox(card: CardMesh) {
     if (card.getObjectByName('hitbox')) return
@@ -268,7 +268,7 @@ export function createTableScene(): TableSceneApi {
     // Parent to camera so the fan always sits in the lower viewport
     camera.add(handGroup)
     handGroup.position.set(HAND_CAM_X, HAND_CAM_Y, HAND_CAM_Z)
-    handGroup.rotation.x = 0.18
+    handGroup.rotation.x = 0.08
 
     const canvas = threeRenderer.domElement
     canvas.style.display = 'block'
@@ -501,49 +501,44 @@ export function createTableScene(): TableSceneApi {
     }
     while (cards.length < handCount) {
       const card = createCard('Peril', 'back')
-      card.scale.setScalar(0.85)
+      card.scale.setScalar(0.9)
       const i = cards.length
       card.userData.index = i
       handle.handAnchor.add(card)
       cards.push(card)
     }
 
-    // Orient the fan so card faces point at the local camera (readable portrait)
-    handle.handAnchor.position.set(0, 0.4, 0.2)
+    // Yaw toward camera only — keep world-up so cards stay portrait like the local hand.
+    // Full lookAt tilts them flat from our elevated seat and reads as "horizontal".
+    handle.handAnchor.position.set(0, 0.36, 0.28)
+    let faceYaw = 0
     if (camera) {
       const anchorWorld = new THREE.Vector3()
       handle.group.localToWorld(anchorWorld.copy(handle.handAnchor.position))
-      // Build a look-at matrix toward the camera, then convert to local space
-      const look = new THREE.Matrix4()
-      look.lookAt(anchorWorld, camera.position, new THREE.Vector3(0, 1, 0))
-      const worldQuat = new THREE.Quaternion().setFromRotationMatrix(look)
-      // lookAt faces -Z; cards face +Z, so flip 180° around Y
-      worldQuat.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI))
-      const parentQuat = new THREE.Quaternion()
-      handle.group.getWorldQuaternion(parentQuat)
-      const localQuat = parentQuat.clone().invert().multiply(worldQuat)
-      handle.handAnchor.quaternion.copy(localQuat)
-    } else {
-      handle.handAnchor.rotation.set(-0.2, 0, 0)
+      const dx = camera.position.x - anchorWorld.x
+      const dz = camera.position.z - anchorWorld.z
+      faceYaw = Math.atan2(dx, dz) - handle.group.rotation.y
     }
+    handle.handAnchor.rotation.set(-0.35, faceYaw, 0)
 
     const n = cards.length
-    const spread = Math.min(0.088, 0.55 / Math.max(n, 1))
+    const spread = Math.min(0.09, 0.58 / Math.max(n, 1))
     const start = -((n - 1) * spread) / 2
     cards.forEach((card, i) => {
       const mid = (n - 1) / 2
       const isPeek = hoverIdx === i
       card.position.x = start + i * spread
-      card.position.y = isPeek ? 0.035 : 0
-      card.position.z = 0.006 * Math.abs(i - mid)
-      card.userData.baseY = isPeek ? 0.035 : 0
-      card.userData.baseRotX = 0
-      card.userData.baseRotY = (i - mid) * -0.032
-      card.userData.baseRotZ = (i - mid) * -0.016
+      card.position.y = isPeek ? 0.04 : 0
+      card.position.z = 0.008 * Math.abs(i - mid)
+      card.userData.baseY = isPeek ? 0.04 : 0
+      // Same upright fan language as the local camera-space hand
+      card.userData.baseRotX = isPeek ? -0.04 : -0.08
+      card.userData.baseRotY = (i - mid) * -0.03
+      card.userData.baseRotZ = (i - mid) * -0.014
       card.rotation.x = card.userData.baseRotX
       card.rotation.y = card.userData.baseRotY
       card.rotation.z = card.userData.baseRotZ
-      if (Math.abs(card.scale.x - 0.85) > 0.01) card.scale.setScalar(0.85)
+      if (Math.abs(card.scale.x - 0.9) > 0.01) card.scale.setScalar(0.9)
       swapPeerCardFace(card, isPeek ? peekText : null, isPeek)
     })
   }
@@ -1532,14 +1527,16 @@ export function createTableScene(): TableSceneApi {
 
     if (handGroup) {
       const t = camBlend.value
-      handGroup.visible = t < 0.92
+      const hideForVote =
+        room?.phase === 'voting' || room?.phase === 'scoring' || room?.phase === 'revealing'
+      handGroup.visible = t < 0.85 && !hideForVote
       // Slide the camera-space fan down/out when looking at the table
       handGroup.position.set(
         HAND_CAM_X,
-        HAND_CAM_Y - t * 0.12,
-        HAND_CAM_Z - t * 0.08,
+        HAND_CAM_Y - t * 0.16,
+        HAND_CAM_Z - t * 0.06,
       )
-      handGroup.rotation.x = 0.18 + t * 0.1
+      handGroup.rotation.x = 0.08 + t * 0.12
     }
 
     const inHandZone = !lookClose && zoneFromPointer(pointerScreenY) === 'hand'

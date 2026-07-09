@@ -335,20 +335,25 @@
   .prompt {
     position: absolute;
     z-index: 2;
-    top: 5.5rem;
-    left: 50%;
-    transform: translateX(-50%);
-    width: min(36rem, calc(100% - 2rem));
-    text-align: center;
+    top: 4.75rem;
+    left: 1.25rem;
+    right: auto;
+    transform: none;
+    width: min(22rem, calc(100% - 11rem));
+    text-align: left;
     font-family: "Instrument Serif", Georgia, serif;
-    font-size: clamp(1.2rem, 3vw, 1.7rem);
-    line-height: 1.25;
+    font-size: clamp(1.05rem, 2.4vw, 1.35rem);
+    line-height: 1.3;
     color: var(--ink);
     text-shadow: 0 1px 0 rgba(255,255,255,.5);
     pointer-events: none;
     transition: opacity 280ms ease;
+    padding: 0.55rem 0.75rem;
+    border-radius: 12px;
+    background: rgba(250, 250, 248, 0.72);
+    backdrop-filter: blur(8px);
   }
-  .prompt.dim { opacity: 0.35; }
+  .prompt.dim { opacity: 0.4; }
   .pick {
     display: inline-block;
     margin-left: 0.5rem;
