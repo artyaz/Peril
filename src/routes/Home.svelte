@@ -2,13 +2,13 @@
   import { onMount } from 'svelte'
   import { navigate } from '../lib/router'
   import { loadSession, saveSession, makePlayerId, makeRoomCode, recentRooms, rememberRoom } from '../lib/session'
-  import { createRoomHttp } from '../lib/transport'
+  import { createRoomHttp, joinRoomHttp } from '../lib/transport'
 
   let name = $state(loadSession()?.name || '')
   let joinCode = $state('')
   let roomName = $state('Living Room')
   let recent = $state(recentRooms())
-  let busy = $state(false)
+  let busy = $state<'create' | 'join' | null>(null)
   let error = $state('')
 
   onMount(() => {
@@ -21,18 +21,10 @@
       error = 'Pick a name first'
       return
     }
-    busy = true
+    busy = 'create'
     try {
       const playerId = loadSession()?.id || makePlayerId()
       const code = makeRoomCode()
-      saveSession({
-        id: playerId,
-        name: name.trim().slice(0, 24),
-        roomCode: code,
-        createdAt: Date.now(),
-        faceDataUrl: loadSession()?.faceDataUrl,
-      })
-      rememberRoom(code, roomName.trim() || 'Untitled')
       const data = await createRoomHttp({
         name: roomName.trim() || 'Untitled',
         hostId: playerId,
@@ -41,15 +33,23 @@
         code,
         faceDataUrl: loadSession()?.faceDataUrl,
       })
+      saveSession({
+        id: playerId,
+        name: name.trim().slice(0, 24),
+        roomCode: data.code,
+        createdAt: Date.now(),
+        faceDataUrl: loadSession()?.faceDataUrl,
+      })
+      rememberRoom(data.code, data.name)
       navigate({ name: 'lobby', code: data.code })
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed'
     } finally {
-      busy = false
+      busy = null
     }
   }
 
-  function joinRoom(code?: string) {
+  async function joinRoom(code?: string) {
     error = ''
     const c = (code || joinCode).trim().toUpperCase()
     if (!name.trim()) {
@@ -60,16 +60,31 @@
       error = 'Enter a room code'
       return
     }
-    const playerId = loadSession()?.id || makePlayerId()
-    saveSession({
-      id: playerId,
-      name: name.trim().slice(0, 24),
-      roomCode: c,
-      createdAt: Date.now(),
-      faceDataUrl: loadSession()?.faceDataUrl,
-    })
-    rememberRoom(c, recent.find((r) => r.code === c)?.name || c)
-    navigate({ name: 'lobby', code: c })
+    busy = 'join'
+    try {
+      const current = loadSession()
+      const playerId = current?.id || makePlayerId()
+      const cleanName = name.trim().slice(0, 24)
+      const data = await joinRoomHttp({
+        code: c,
+        playerId,
+        name: cleanName,
+        faceDataUrl: current?.faceDataUrl,
+      })
+      saveSession({
+        id: playerId,
+        name: cleanName,
+        roomCode: data.code,
+        createdAt: Date.now(),
+        faceDataUrl: current?.faceDataUrl,
+      })
+      rememberRoom(data.code, data.state.name)
+      navigate({ name: data.state.phase === 'lobby' ? 'lobby' : 'table', code: data.code })
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Could not join room'
+    } finally {
+      busy = null
+    }
   }
 </script>
 
@@ -91,8 +106,8 @@
         <input id="room" maxlength="40" placeholder="Living Room" bind:value={roomName} />
       </div>
 
-      <button class="primary wide" disabled={busy} onclick={createRoom}>
-        {busy ? 'Creating…' : 'Create room'}
+      <button class="primary wide" disabled={!!busy} onclick={createRoom}>
+        {busy === 'create' ? 'Creating…' : 'Create room'}
       </button>
 
       <div class="or"><span>or join</span></div>
@@ -106,8 +121,14 @@
             placeholder="AB12C"
             bind:value={joinCode}
             class="code"
+            disabled={!!busy}
+            onkeydown={(event) => {
+              if (event.key === 'Enter') void joinRoom()
+            }}
           />
-          <button type="button" onclick={() => joinRoom()}>Join</button>
+          <button type="button" disabled={!!busy} onclick={() => joinRoom()}>
+            {busy === 'join' ? 'Checking…' : 'Join'}
+          </button>
         </div>
       </div>
 
@@ -115,7 +136,7 @@
         <div class="muted recent-label">Recent</div>
         <div class="row chips">
           {#each recent as r}
-            <button type="button" class="chip" onclick={() => joinRoom(r.code)}>{r.code}</button>
+            <button type="button" class="chip" disabled={!!busy} onclick={() => joinRoom(r.code)}>{r.code}</button>
           {/each}
         </div>
       {/if}

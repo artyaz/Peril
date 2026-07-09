@@ -27,6 +27,7 @@ export type TableSceneApi = {
   onDragCard: (drag: CardDrag | null) => void
   onMoveTableCard: (key: string, x: number, z: number, rotY?: number) => void
   onVote: (submissionPlayerId: string) => void
+  onStageChange: (count: number, required: number) => void
   lookCloser: (on: boolean) => void
   resize: () => void
 }
@@ -44,10 +45,16 @@ type LocalDrag = {
   startY: number
   moved: boolean
   rotY: number
-  /** Smoothed follow target in the card's parent space */
-  followX: Spring
-  followY: Spring
-  followZ: Spring
+  /** Preserve the exact point grabbed while crossing hand/table planes. */
+  grabOffsetX: number
+  grabOffsetY: number
+  grabOffsetZ: number
+  lastClientX: number
+  lastClientY: number
+  lastMoveAt: number
+  velocityX: number
+  velocityY: number
+  overTable: boolean
   /** Hand reorder: last slot we snapped into */
   reorderSlot?: number
   /** Whether dropping on the table may submit a play */
@@ -58,11 +65,9 @@ const TABLE_Y = 1.55
 const TABLE_RADIUS = 0.52
 const HAND_ZONE_Y = 0.56
 const DRAG_BROADCAST_MS = 40
-const CLICK_MOVE_PX = 6
+const CLICK_MOVE_PX = 3
 /** Feet Y — keep heads + name pills inside the upper frame. */
 const AVATAR_SIT_Y = TABLE_Y - 0.55
-const DRAG_STIFF = 420
-const DRAG_DAMP = 34
 /** Local hand in camera space — slightly closer than before. */
 const HAND_CAM_X = 0
 const HAND_CAM_Y = -0.16
@@ -108,6 +113,7 @@ export function createTableScene(): TableSceneApi {
   let dragCb: (drag: CardDrag | null) => void = () => {}
   let moveTableCb: (key: string, x: number, z: number, rotY?: number) => void = () => {}
   let voteCb: (id: string) => void = () => {}
+  let stageCb: (count: number, required: number) => void = () => {}
 
   const raycaster = new THREE.Raycaster()
   const pointer = new THREE.Vector2()
@@ -303,10 +309,6 @@ export function createTableScene(): TableSceneApi {
     canvas.addEventListener('pointerup', onPointerUp)
     canvas.addEventListener('pointercancel', onPointerUp)
     canvas.addEventListener('pointerleave', onPointerLeaveCanvas)
-    el.addEventListener('pointerdown', onPointerDown)
-    el.addEventListener('pointermove', onPointerMove)
-    el.addEventListener('pointerup', onPointerUp)
-    el.addEventListener('pointercancel', onPointerUp)
 
     resize()
     clock.start()
@@ -315,12 +317,6 @@ export function createTableScene(): TableSceneApi {
 
   function unmount() {
     cancelAnimationFrame(raf)
-    if (root) {
-      root.removeEventListener('pointerdown', onPointerDown)
-      root.removeEventListener('pointermove', onPointerMove)
-      root.removeEventListener('pointerup', onPointerUp)
-      root.removeEventListener('pointercancel', onPointerUp)
-    }
     if (threeRenderer) {
       const canvas = threeRenderer.domElement
       canvas.removeEventListener('pointerdown', onPointerDown)
@@ -383,13 +379,26 @@ export function createTableScene(): TableSceneApi {
     tableCards = []
   }
 
-  function cardKeyFor(playerId: string, cardIndex: number, text: string) {
-    return `${playerId}:${cardIndex}:${text}`
+  function cardKeyFor(submissionId: string, cardIndex: number) {
+    return `${submissionId}:${cardIndex}`
   }
 
   function zoneFromPointer(screenY: number) {
     if (screenY > HAND_ZONE_Y) return 'hand' as const
     return 'table' as const
+  }
+
+  function interactionZone(screenY: number) {
+    if (
+      lookClose ||
+      room?.phase === 'voting' ||
+      room?.phase === 'revealing' ||
+      room?.phase === 'scoring' ||
+      room?.phase === 'ended'
+    ) {
+      return 'table' as const
+    }
+    return zoneFromPointer(screenY)
   }
 
   function updatePointerFromEvent(ev: PointerEvent) {
@@ -562,45 +571,6 @@ export function createTableScene(): TableSceneApi {
 
     applyHandSlotTargets(!dragCard)
     handGroup.position.set(HAND_CAM_X, HAND_CAM_Y, HAND_CAM_Z)
-  }
-
-  function separateTableCards(exclude?: CardMesh | null) {
-    for (let iter = 0; iter < CARD_COLLIDE_ITERS; iter++) {
-      for (let i = 0; i < tableCards.length; i++) {
-        const a = tableCards[i]
-        if (a === exclude || a.userData.dragging) continue
-        for (let j = i + 1; j < tableCards.length; j++) {
-          const b = tableCards[j]
-          if (b === exclude || b.userData.dragging) continue
-          const dx = b.position.x - a.position.x
-          const dz = b.position.z - a.position.z
-          const dist = Math.hypot(dx, dz) || 0.0001
-          const min = CARD_COLLIDE_R * (a.scale.x + b.scale.x)
-          if (dist >= min) continue
-          const push = (min - dist) * 0.5
-          const nx = dx / dist
-          const nz = dz / dist
-          // Prefer moving the unpinned / newer card
-          const moveA = !a.userData.pinned || !!b.userData.pinned
-          const moveB = !b.userData.pinned || !!a.userData.pinned
-          const share = moveA && moveB ? 0.5 : 1
-          if (moveA) {
-            a.position.x -= nx * push * share
-            a.position.z -= nz * push * share
-            const c = clampToTable(a.position.x, a.position.z)
-            a.position.x = c.x
-            a.position.z = c.z
-          }
-          if (moveB) {
-            b.position.x += nx * push * share
-            b.position.z += nz * push * share
-            const c = clampToTable(b.position.x, b.position.z)
-            b.position.x = c.x
-            b.position.z = c.z
-          }
-        }
-      }
-    }
   }
 
   function resolveDropAgainstTable(card: CardMesh, x: number, z: number) {
@@ -853,9 +823,12 @@ export function createTableScene(): TableSceneApi {
       const arcX = (t - 0.5) * 0.34
       const arcZ = 0.08
       sub.cards.forEach((text, ci) => {
-        const key = cardKeyFor(sub.playerId, ci, text)
+        const submissionId = sub.id || `${state.round}:${sub.playerId}:${i}`
+        const key = cardKeyFor(submissionId, ci)
         nextKeys.add(key)
-        const pos = sub.positions?.[ci]
+        const pos =
+          sub.positions?.[ci] ||
+          state.tablePositions?.find((candidate) => candidate.key === key)
         const hasServerPos = !!pos
         const ox =
           pos?.x ??
@@ -877,7 +850,7 @@ export function createTableScene(): TableSceneApi {
       })
     })
 
-    const identitySig = desired.map((d) => `${d.key}:${d.revealed}`).join(';')
+    const identitySig = desired.map((d) => d.key).join(';')
     const stagedCount = stagedPlays.length
     const confirmedCount = tableCards.filter(
       (c) => !c.userData.cardKey?.startsWith('local:'),
@@ -912,6 +885,10 @@ export function createTableScene(): TableSceneApi {
         if (!card || card.userData.dragging) continue
         card.userData.selectable = state.phase === 'voting'
         card.userData.submissionPlayerId = d.playerId
+        const wantKind: 'white' | 'back' = d.revealed ? 'white' : 'back'
+        const wantText = d.revealed ? d.text : 'Peril'
+        setCardFace(card, wantText, wantKind)
+        card.userData.cardText = d.revealed ? d.text : '???'
         const myVote = localVoteId || state.votes?.[localId]
         const isVoted = state.phase === 'voting' && myVote === d.playerId
         const isWinner =
@@ -1097,9 +1074,6 @@ export function createTableScene(): TableSceneApi {
       m.emissive = new THREE.Color(emissive)
       m.emissiveIntensity = intensity
     }
-    if (voted || winner || hovered) {
-      card.userData.baseY = Math.max(card.userData.baseY, TABLE_CARD_Y + (hovered ? 0.02 : 0.012))
-    }
   }
 
   function applyGhost(drag: CardDrag | null) {
@@ -1140,7 +1114,7 @@ export function createTableScene(): TableSceneApi {
     if (now - lastDragBroadcast < DRAG_BROADCAST_MS) return
     lastDragBroadcast = now
     const worldY =
-      localDrag.source === 'hand' && zoneFromPointer(pointerScreenY) === 'hand'
+      localDrag.source === 'hand' && dragZone(localDrag) === 'hand'
         ? TABLE_Y + 0.05
         : TABLE_Y + TABLE_CARD_Y + 0.01
     const local = worldToTableLocal(
@@ -1176,12 +1150,50 @@ export function createTableScene(): TableSceneApi {
     })
   }
 
-  function makeDragSprings(x: number, y: number, z: number) {
+  function makeDragTracking(
+    card: CardMesh,
+    source: 'hand' | 'table',
+    ev: PointerEvent,
+  ) {
+    if (source === 'hand') updateHandDragPlane()
+    else tablePlane.constant = -(TABLE_Y + TABLE_CARD_Y + 0.018)
+    const hit = projectOntoPlane(source === 'hand' ? handPlane : tablePlane)
+    const parent = source === 'hand' ? handGroup : tableGroup
+    const localHit = hit && parent ? parent.worldToLocal(hit.clone()) : card.position.clone()
+    const now = performance.now()
     return {
-      followX: new Spring(x, DRAG_STIFF, DRAG_DAMP),
-      followY: new Spring(y, DRAG_STIFF, DRAG_DAMP),
-      followZ: new Spring(z, DRAG_STIFF, DRAG_DAMP),
+      grabOffsetX: card.position.x - localHit.x,
+      grabOffsetY: card.position.y - localHit.y,
+      grabOffsetZ: card.position.z - localHit.z,
+      lastClientX: ev.clientX,
+      lastClientY: ev.clientY,
+      lastMoveAt: now,
+      velocityX: 0,
+      velocityY: 0,
+      overTable: source === 'table' || interactionZone(pointerScreenY) === 'table',
     }
+  }
+
+  function recaptureDragOffset(
+    drag: LocalDrag,
+    hit: THREE.Vector3,
+    parent: THREE.Object3D,
+  ) {
+    const localHit = parent.worldToLocal(hit.clone())
+    drag.grabOffsetX = drag.card.position.x - localHit.x
+    drag.grabOffsetY = drag.card.position.y - localHit.y
+    drag.grabOffsetZ = drag.card.position.z - localHit.z
+  }
+
+  function dragZone(drag: LocalDrag) {
+    if (drag.source === 'table' || lookClose) return 'table' as const
+    if (!drag.canPlay) return 'hand' as const
+    if (drag.overTable) {
+      if (pointerScreenY > HAND_ZONE_Y + 0.07) drag.overTable = false
+    } else if (pointerScreenY < HAND_ZONE_Y - 0.035) {
+      drag.overTable = true
+    }
+    return drag.overTable ? 'table' as const : 'hand' as const
   }
 
   function updateHandDragPlane() {
@@ -1194,7 +1206,7 @@ export function createTableScene(): TableSceneApi {
 
   function updateLocalDragPosition() {
     if (!localDrag || !camera) return
-    const zone = zoneFromPointer(pointerScreenY)
+    const zone = dragZone(localDrag)
     const useHandPlane = localDrag.source === 'hand' && zone === 'hand'
     if (useHandPlane) updateHandDragPlane()
     else tablePlane.constant = -(TABLE_Y + TABLE_CARD_Y + 0.018)
@@ -1213,9 +1225,7 @@ export function createTableScene(): TableSceneApi {
           tableGroup.add(localDrag.card)
           const loc = tableGroup.worldToLocal(w)
           localDrag.card.position.copy(loc)
-          localDrag.followX.set(loc.x)
-          localDrag.followY.set(Math.max(loc.y, TABLE_CARD_Y + 0.02))
-          localDrag.followZ.set(loc.z)
+          recaptureDragOffset(localDrag, hit, tableGroup)
           localDrag.card.userData.baseRotX = TABLE_FACE_UP_X
           localDrag.card.rotation.x = TABLE_FACE_UP_X
           localDrag.card.rotation.y = localDrag.rotY
@@ -1223,11 +1233,17 @@ export function createTableScene(): TableSceneApi {
         }
         if (tableGroup) {
           const loc = tableGroup.worldToLocal(hit)
-          const raw = clampToTable(loc.x, loc.z)
-          const c = resolveDropAgainstTable(localDrag.card, raw.x, raw.z)
-          localDrag.followX.center = c.x
-          localDrag.followZ.center = c.z
-          localDrag.followY.center = TABLE_CARD_Y + 0.045
+          const target = clampToTable(
+            loc.x + localDrag.grabOffsetX,
+            loc.z + localDrag.grabOffsetZ,
+          )
+          localDrag.card.position.set(
+            target.x,
+            TABLE_CARD_Y + 0.045,
+            target.z,
+          )
+          localDrag.card.userData.baseY = localDrag.card.position.y
+          localDrag.card.rotation.y = localDrag.rotY
         }
       } else {
         if (localDrag.card.parent !== handGroup && handGroup) {
@@ -1237,23 +1253,26 @@ export function createTableScene(): TableSceneApi {
           handGroup.add(localDrag.card)
           const loc = handGroup.worldToLocal(w)
           localDrag.card.position.copy(loc)
-          localDrag.followX.set(loc.x)
-          localDrag.followY.set(loc.y)
-          localDrag.followZ.set(loc.z)
+          recaptureDragOffset(localDrag, hit, handGroup)
           localDrag.card.userData.baseRotX = -0.08
           localDrag.card.rotation.order = 'YXZ'
         }
         if (handGroup) {
           const loc = handGroup.worldToLocal(hit)
-          localDrag.followX.center = loc.x
-          localDrag.followY.center = Math.max(loc.y, 0.06)
-          localDrag.followZ.center = loc.z
+          const targetX = loc.x + localDrag.grabOffsetX
+          const targetY = Math.max(loc.y + localDrag.grabOffsetY, 0.055)
+          const targetZ = loc.z + localDrag.grabOffsetZ
+          localDrag.card.position.set(targetX, targetY, targetZ)
+          localDrag.card.userData.baseY = targetY
           localDrag.card.rotation.x = -0.08
+          localDrag.card.rotation.z =
+            localDrag.card.userData.baseRotZ -
+            THREE.MathUtils.clamp(localDrag.velocityX * 0.035, -0.08, 0.08)
           // Reorder while dragging across the fan
           if (localDrag.moved && handCards.length > 1) {
             const n = handCards.length
             const { spread, start } = handSlotLayout(n, 0)
-            const slot = Math.round((loc.x - start) / Math.max(spread, 0.001))
+            const slot = Math.round((targetX - start) / Math.max(spread, 0.001))
             const clamped = THREE.MathUtils.clamp(slot, 0, n - 1)
             const from = localDrag.handIndex ?? handCards.indexOf(localDrag.card)
             if (from >= 0 && clamped !== from && clamped !== localDrag.reorderSlot) {
@@ -1264,11 +1283,16 @@ export function createTableScene(): TableSceneApi {
       }
     } else if (tableGroup) {
       const loc = tableGroup.worldToLocal(hit)
-      const raw = clampToTable(loc.x, loc.z)
-      const c = resolveDropAgainstTable(localDrag.card, raw.x, raw.z)
-      localDrag.followX.center = c.x
-      localDrag.followZ.center = c.z
-      localDrag.followY.center = TABLE_CARD_Y + 0.045
+      const target = clampToTable(
+        loc.x + localDrag.grabOffsetX,
+        loc.z + localDrag.grabOffsetZ,
+      )
+      localDrag.card.position.set(
+        target.x,
+        TABLE_CARD_Y + 0.045,
+        target.z,
+      )
+      localDrag.card.userData.baseY = localDrag.card.position.y
       localDrag.card.rotation.x = TABLE_FACE_UP_X
       localDrag.card.userData.baseRotX = TABLE_FACE_UP_X
       localDrag.card.rotation.y = localDrag.rotY
@@ -1286,6 +1310,9 @@ export function createTableScene(): TableSceneApi {
       tableGroup?.remove(card)
       handGroup.add(card)
     }
+    card.scale.setScalar(1)
+    card.renderOrder = 0
+    card.rotation.z = card.userData.baseRotZ
     localDrag = null
     dragCb(null)
     applyHandSlotTargets(true)
@@ -1337,7 +1364,13 @@ export function createTableScene(): TableSceneApi {
     card.rotation.z = 0
     card.userData.baseRotZ = 0
     card.scale.setScalar(0.95)
+    card.renderOrder = 0
     dropCard(card, TABLE_CARD_Y + 0.08, TABLE_CARD_Y)
+    card.userData.lift.velocity = THREE.MathUtils.clamp(
+      -2.2 - Math.max(localDrag.velocityY, 0) * 0.75,
+      -3.5,
+      -1.8,
+    )
     card.userData.cardKey = `local:${localId}:${stageIndex}:${text}`
     card.userData.submissionPlayerId = localId
     card.userData.cardText = text
@@ -1348,9 +1381,8 @@ export function createTableScene(): TableSceneApi {
     handCards = handCards.filter((h) => h !== card)
     applyHandSlotTargets(true)
     if (!tableCards.includes(card)) tableCards.push(card)
-    separateTableCards(null)
-
     stagedPlays.push({ text, x: c.x, z: c.z, rotY, card })
+    stageCb(stagedPlays.length, pick)
     localDrag = null
     dragCb(null)
 
@@ -1378,17 +1410,32 @@ export function createTableScene(): TableSceneApi {
     card.rotation.y = rotY
     card.userData.baseRotX = TABLE_FACE_UP_X
     card.rotation.x = TABLE_FACE_UP_X
+    card.scale.setScalar(0.95)
+    card.renderOrder = 0
     dropCard(card, card.position.y, TABLE_CARD_Y)
-    separateTableCards(null)
+    card.userData.lift.velocity = THREE.MathUtils.clamp(
+      -2.1 - Math.max(localDrag.velocityY, 0) * 0.7,
+      -3.4,
+      -1.7,
+    )
     localDrag = null
     dragCb(null)
-    if (key) moveTableCb(key, settled.x, settled.z, rotY)
+    if (key.startsWith(`local:${localId}:`)) {
+      const staged = stagedPlays.find((item) => item.card === card)
+      if (staged) {
+        staged.x = settled.x
+        staged.z = settled.z
+        staged.rotY = rotY
+      }
+    } else if (key) {
+      moveTableCb(key, settled.x, settled.z, rotY)
+    }
   }
 
   function onPointerDown(ev: PointerEvent) {
     if (!camera || !room || localDrag) return
     updatePointerFromEvent(ev)
-    const zone = lookClose ? 'table' : zoneFromPointer(pointerScreenY)
+    const zone = interactionZone(pointerScreenY)
     raycaster.setFromCamera(pointer, camera)
 
     if (
@@ -1419,15 +1466,17 @@ export function createTableScene(): TableSceneApi {
           startY: ev.clientY,
           moved: false,
           // Mark non-throwable drags so pointer-up always cancels to hand
-          rotY: canThrow ? (Math.random() - 0.5) * 0.18 : 0,
-          ...makeDragSprings(card.position.x, card.position.y + 0.04, card.position.z),
+          rotY: 0,
+          ...makeDragTracking(card, 'hand', ev),
         }
         localDrag.canPlay = canThrow
-        localDrag.followY.center = card.position.y + 0.04
-        card.renderOrder = 5
+        card.position.y += 0.035
+        card.scale.setScalar(1.04)
+        card.renderOrder = 10
+        if (threeRenderer) threeRenderer.domElement.style.cursor = 'grabbing'
         setHover(null)
         try {
-          ;(ev.currentTarget as HTMLElement).setPointerCapture?.(ev.pointerId)
+          threeRenderer?.domElement.setPointerCapture?.(ev.pointerId)
         } catch {
           /* ignore */
         }
@@ -1440,10 +1489,7 @@ export function createTableScene(): TableSceneApi {
 
     const canRearrange =
       tableCards.length > 0 &&
-      (room.phase === 'playing' ||
-        room.phase === 'revealing' ||
-        room.phase === 'voting' ||
-        room.phase === 'scoring')
+      (room.phase === 'playing' || room.phase === 'voting')
 
     if ((zone === 'table' || lookClose) && canRearrange) {
       const hits = raycaster.intersectObjects(tableCards, true)
@@ -1462,6 +1508,12 @@ export function createTableScene(): TableSceneApi {
           ev.preventDefault()
           return
         }
+        if (
+          card.userData.submissionPlayerId !== localId &&
+          !card.userData.cardKey?.startsWith(`local:${localId}:`)
+        ) {
+          return
+        }
         // Any table card is rearrangeable — invent a key if missing
         if (!key) {
           card.userData.cardKey = `loose:${card.userData.submissionPlayerId || 'x'}:${card.userData.index}:${card.userData.cardText}`
@@ -1477,11 +1529,13 @@ export function createTableScene(): TableSceneApi {
           startY: ev.clientY,
           moved: false,
           rotY: card.userData.baseRotY || 0,
-          ...makeDragSprings(card.position.x, TABLE_CARD_Y + 0.045, card.position.z),
+          ...makeDragTracking(card, 'table', ev),
         }
-        localDrag.followY.center = TABLE_CARD_Y + 0.045
+        card.scale.setScalar(1)
+        card.renderOrder = 10
+        if (threeRenderer) threeRenderer.domElement.style.cursor = 'grabbing'
         try {
-          ;(ev.currentTarget as HTMLElement).setPointerCapture?.(ev.pointerId)
+          threeRenderer?.domElement.setPointerCapture?.(ev.pointerId)
         } catch {
           /* ignore */
         }
@@ -1519,16 +1573,33 @@ export function createTableScene(): TableSceneApi {
       const dy = ev.clientY - localDrag.startY
       if (Math.hypot(dx, dy) > CLICK_MOVE_PX) localDrag.moved = true
 
+      const now = performance.now()
+      const elapsed = Math.max(now - localDrag.lastMoveAt, 1)
+      const instantX = (ev.clientX - localDrag.lastClientX) / elapsed
+      const instantY = (ev.clientY - localDrag.lastClientY) / elapsed
+      localDrag.velocityX = localDrag.velocityX * 0.62 + instantX * 0.38
+      localDrag.velocityY = localDrag.velocityY * 0.62 + instantY * 0.38
+      localDrag.lastClientX = ev.clientX
+      localDrag.lastClientY = ev.clientY
+      localDrag.lastMoveAt = now
+      const targetRotation = THREE.MathUtils.clamp(
+        localDrag.velocityX * 0.075,
+        -0.18,
+        0.18,
+      )
+      localDrag.rotY = THREE.MathUtils.lerp(localDrag.rotY, targetRotation, 0.32)
+
       if (!localDrag.card.userData.dragging && localDrag.source === 'table' && localDrag.moved) {
         localDrag.card.userData.dragging = true
       }
       if (localDrag.card.userData.dragging || localDrag.source === 'hand') {
         updateLocalDragPosition()
       }
+      threeRenderer.domElement.style.cursor = 'grabbing'
       return
     }
 
-    const zone = lookClose ? 'table' : zoneFromPointer(pointerScreenY)
+    const zone = interactionZone(pointerScreenY)
     raycaster.setFromCamera(pointer, camera)
     if (zone === 'hand' && !lookClose) {
       hoveredTableCard = null
@@ -1560,12 +1631,24 @@ export function createTableScene(): TableSceneApi {
         setHover(null)
       }
     }
+    threeRenderer.domElement.style.cursor =
+      hoveredTableCard || hoveredIndex != null
+        ? room?.phase === 'voting'
+          ? 'pointer'
+          : 'grab'
+        : 'default'
   }
 
   function onPointerUp(ev: PointerEvent) {
     if (!localDrag || ev.pointerId !== localDrag.pointerId) return
     updatePointerFromEvent(ev)
-    const zone = lookClose ? 'table' : zoneFromPointer(pointerScreenY)
+    const zone = dragZone(localDrag)
+    try {
+      threeRenderer?.domElement.releasePointerCapture?.(ev.pointerId)
+    } catch {
+      /* pointer capture may already be released on cancel */
+    }
+    if (threeRenderer) threeRenderer.domElement.style.cursor = 'default'
 
     if (localDrag.source === 'hand') {
       const canPlay =
@@ -1594,6 +1677,7 @@ export function createTableScene(): TableSceneApi {
     if (!localDrag) {
       setHover(null)
       hoveredTableCard = null
+      if (threeRenderer) threeRenderer.domElement.style.cursor = 'default'
     }
   }
 
@@ -1618,9 +1702,11 @@ export function createTableScene(): TableSceneApi {
     if (state.phase !== 'playing') {
       stagedPlays = []
       playSubmitPending = false
+      stageCb(0, state.blackCard?.pick || 1)
     } else if (serverHasMyPlay) {
       stagedPlays = []
       playSubmitPending = false
+      stageCb(0, state.blackCard?.pick || 1)
     }
 
     // Sync optimistic vote with server
@@ -1690,6 +1776,7 @@ export function createTableScene(): TableSceneApi {
     }
     stagedPlays = []
     playSubmitPending = false
+    stageCb(0, room?.blackCard?.pick || 1)
     // Rebuild hand including restored cards
     const merged = [...(room?.you?.hand || [])]
     for (const t of texts) {
@@ -1713,11 +1800,11 @@ export function createTableScene(): TableSceneApi {
     if (hoveredIndex === index) return
     hoveredIndex = index
     const text =
-      index != null && zoneFromPointer(pointerScreenY) === 'hand'
+      index != null && interactionZone(pointerScreenY) === 'hand'
         ? handCards[index]?.userData.cardText ?? null
         : null
     // Only broadcast hand peeks
-    if (zoneFromPointer(pointerScreenY) === 'hand' || index == null) {
+    if (interactionZone(pointerScreenY) === 'hand' || index == null) {
       hoverCb(index, text)
     }
   }
@@ -1736,17 +1823,6 @@ export function createTableScene(): TableSceneApi {
     else camBlend.animate(dt)
     camPanX.animate(dt)
     camPanZ.animate(dt)
-
-    if (localDrag?.card.userData.dragging) {
-      const x = localDrag.followX.animate(dt)
-      const y = localDrag.followY.animate(dt)
-      const z = localDrag.followZ.animate(dt)
-      localDrag.card.position.set(x, y, z)
-      localDrag.card.userData.baseY = y
-      if (localDrag.source === 'table' || localDrag.card.parent === tableGroup) {
-        separateTableCards(localDrag.card)
-      }
-    }
 
     if (camera) {
       const t = camBlend.value
@@ -1777,7 +1853,7 @@ export function createTableScene(): TableSceneApi {
       handGroup.rotation.x = 0.08 + t * 0.12
     }
 
-    const inHandZone = !lookClose && zoneFromPointer(pointerScreenY) === 'hand'
+    const inHandZone = interactionZone(pointerScreenY) === 'hand'
     handCards.forEach((c, i) => {
       if (c.userData.dragging) return
       // Spring toward reorder slots
@@ -1790,7 +1866,7 @@ export function createTableScene(): TableSceneApi {
       updateCardMotion(c, dt, hovered, sel, { lift: 0.07, tiltX: -0.018, tiltZ: 0.006 })
     })
 
-    const inTableZone = lookClose || zoneFromPointer(pointerScreenY) === 'table'
+    const inTableZone = interactionZone(pointerScreenY) === 'table'
     const voting = room?.phase === 'voting'
     const myVoteTarget = localVoteId || (localId ? room?.votes?.[localId] : null) || null
     tableCards.forEach((c) => {
@@ -1812,11 +1888,6 @@ export function createTableScene(): TableSceneApi {
     if (blackCard) {
       updateCardMotion(blackCard, dt, false, false)
       blackCard.rotation.x = blackCard.userData.baseRotX
-    }
-
-    // Soft settle so cards don't rest intersecting (skip while rearranging)
-    if (localDrag?.source === 'table' || localDrag?.card?.parent === tableGroup) {
-      separateTableCards(localDrag.card)
     }
 
     const t = clock.elapsedTime
@@ -1886,6 +1957,12 @@ export function createTableScene(): TableSceneApi {
     },
     set onVote(fn) {
       voteCb = fn
+    },
+    get onStageChange() {
+      return stageCb
+    },
+    set onStageChange(fn) {
+      stageCb = fn
     },
   }
 }

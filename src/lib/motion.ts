@@ -71,10 +71,18 @@ export class Spring {
   }
 
   animate(dt: number) {
-    const clamped = Math.min(dt, 1 / 20)
-    const force = -this.stiffness * (this.value - this.center) - this.damping * this.velocity
-    this.velocity += (force / this.mass) * clamped
-    this.value += this.velocity * clamped
+    // Integrate in small fixed-ish steps. One large Euler step becomes visibly
+    // unstable when a frame is delayed, which reads as a card "stutter".
+    const clamped = Math.min(Math.max(dt, 0), 1 / 12)
+    const steps = Math.max(1, Math.ceil(clamped / (1 / 120)))
+    const step = clamped / steps
+    for (let i = 0; i < steps; i += 1) {
+      const force =
+        -this.stiffness * (this.value - this.center) -
+        this.damping * this.velocity
+      this.velocity += (force / this.mass) * step
+      this.value += this.velocity * step
+    }
     return this.value
   }
 
