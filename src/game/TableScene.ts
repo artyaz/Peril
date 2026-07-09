@@ -57,11 +57,11 @@ export function createTableScene(): TableSceneApi {
   let handGroup: THREE.Group | null = null
   let worldGroup: THREE.Group | null = null
 
-  // Sitting at a raised table — look across the surface, not down from the ceiling
+  // Sitting at a raised table — look across the surface so peers stay in frame
   const handCamPos = new THREE.Vector3(0, TABLE_Y + 0.38, 1.28)
   const handCamTarget = new THREE.Vector3(0, TABLE_Y + 0.02, 0.48)
-  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 1.15, 1.85)
-  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + 0.05, -0.15)
+  const tableCamPos = new THREE.Vector3(0, TABLE_Y + 0.85, 2.05)
+  const tableCamTarget = new THREE.Vector3(0, TABLE_Y + 0.15, -0.55)
 
   function mount(el: HTMLElement) {
     root = el
@@ -645,19 +645,15 @@ export function createTableScene(): TableSceneApi {
     for (const [id, a] of avatars) {
       const sitY = TABLE_Y - 0.85
       a.group.position.y = sitY + Math.sin(t * 1.1 + a.group.position.x * 2) * 0.008
-      // Billboard only the XP silhouette toward the camera; hands stay table-facing
-      if (camera) {
-        const worldPos = a.group.getWorldPosition(new THREE.Vector3())
-        const dx = camera.position.x - worldPos.x
-        const dz = camera.position.z - worldPos.z
-        const faceYaw = Math.atan2(dx, dz)
-        a.silhouette.rotation.y = faceYaw - a.group.rotation.y
-      }
+      // Sprite silhouette auto-faces camera; keep group yaw toward table for hands
       const hoverIdx = peerHover.get(id) ?? null
       const peekText = peerHoverText.get(id) ?? null
       const cards = peerHands.get(id)
-      const count = Math.max(cards?.length || 0, room?.phase === 'playing' ? (cards?.length || 7) : 5)
-      layoutPeerHand(a, id, count, hoverIdx, peekText)
+      const count = Math.max(
+        cards?.length || 0,
+        Math.min(room?.players.find((p) => p.id === id)?.handCount || 7, 7),
+      )
+      layoutPeerHand(a, id, Math.max(count, 1), hoverIdx, peekText)
     }
 
     for (const [id, cards] of peerHands) {
