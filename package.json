@@ -1,32 +1,19 @@
 {
   "name": "peril",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k \"npm:dev:client\" \"npm:dev:server\"",
-    "dev:client": "vite",
-    "dev:server": "node --watch server/index.js",
+    "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview",
-    "start": "NODE_ENV=production node server/index.js",
-    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json"
+    "preview": "vite preview"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^7.1.2",
-    "@tsconfig/svelte": "^5.0.8",
-    "@types/node": "^24.13.2",
     "@types/three": "^0.178.1",
-    "@types/ws": "^8.18.1",
-    "concurrently": "^9.2.0",
-    "svelte": "^5.56.4",
-    "svelte-check": "^4.7.1",
-    "typescript": "~6.0.2",
-    "vite": "^8.1.1"
+    "typescript": "~5.7.0",
+    "vite": "^6.3.0"
   },
   "dependencies": {
-    "@upstash/redis": "^1.38.0",
-    "three": "^0.178.0",
-    "ws": "^8.18.3"
+    "three": "^0.178.0"
   }
 }
