@@ -1,0 +1,412 @@
+/**
+ * Headless verification for the card solver.
+ * Run: node --experimental-strip-types test/physics.test.ts
+ *
+ * These are behavioural assertions, not unit tests of internals: cards must
+ * settle, stack without sinking, stay put once settled, respect the rail, obey
+ * the grab constraint, and produce identical results across runs.
+ */
+
+import { World, BodyMode, v3, q4, type Q4, type TableSpec } from '../src/physics.ts'
+
+const CARD_HALF = v3(0.0315, 0.044, 0.001)
+const CARD_MASS = 0.0025
+const THICK = CARD_HALF.z * 2
+
+const TABLE: TableSpec = {
+  surfaceY: 0,
+  radius: 0.62,
+  railRadius: 0.616,
+  railTopY: 0.022,
+  floorY: -0.6,
+}
+
+let failures = 0
+let checks = 0
+
+function ok(cond: boolean, label: string, detail = ''): void {
+  checks++
+  if (cond) {
+    console.log(`  \x1b[32mPASS\x1b[0m ${label}${detail ? ` — ${detail}` : ''}`)
+  } else {
+    failures++
+    console.log(`  \x1b[31mFAIL\x1b[0m ${label}${detail ? ` — ${detail}` : ''}`)
+  }
+}
+
+function section(name: string): void {
+  console.log(`\n\x1b[1m${name}\x1b[0m`)
+}
+
+/** Quaternion from axis-angle. */
+function axisAngle(ax: number, ay: number, az: number, angle: number): Q4 {
+  const s = Math.sin(angle / 2)
+  return q4(ax * s, ay * s, az * s, Math.cos(angle / 2))
+}
+
+const FLAT = axisAngle(1, 0, 0, -Math.PI / 2)
+
+function makeWorld(): World {
+  return new World({ ...TABLE })
+}
+
+function run(world: World, seconds: number): void {
+  const dt = 1 / 240
+  const n = Math.round(seconds / dt)
+  for (let i = 0; i < n; i++) world.advance(dt)
+}
+
+// ---------------------------------------------------------------------------
+section('1. A card dropped flat settles on the felt and goes to sleep')
+// ---------------------------------------------------------------------------
+{
+  const w = makeWorld()
+  const card = w.createCard(CARD_HALF, CARD_MASS)
+  card.setTransform(0, 0.3, 0, FLAT)
+
+  run(w, 4)
+
+  const restY = CARD_HALF.z
+  ok(Math.abs(card.p.y - restY) < 0.0006, 'rests at card half-thickness', `y=${card.p.y.toFixed(5)} expected≈${restY}`)
+  ok(card.asleep, 'went to sleep')
+  ok(Math.hypot(card.p.x, card.p.z) < 0.02, 'did not wander', `r=${Math.hypot(card.p.x, card.p.z).toFixed(4)}`)
+  // Face normal should be near-vertical: it landed flat because it *was* flat.
+  const upness = Math.abs(2 * (card.q.x * card.q.z + card.q.w * card.q.y))
+  ok(upness < 0.05, 'stayed flat', `tilt=${upness.toFixed(4)}`)
+}
+
+// ---------------------------------------------------------------------------
+section('2. Cards stack without sinking into each other')
+// ---------------------------------------------------------------------------
+{
+  const w = makeWorld()
+  const n = 5
+  const cards = []
+  for (let i = 0; i < n; i++) {
+    const c = w.createCard(CARD_HALF, CARD_MASS)
+    // Drop them from staggered heights with slight offsets, like real dealing.
+    c.setTransform(0.002 * i, 0.05 + i * 0.03, 0.001 * i, FLAT)
+    cards.push(c)
+  }
+
+  run(w, 6)
+
+  const ys = cards.map((c) => c.p.y).sort((a, b) => a - b)
+  console.log(`     heights: ${ys.map((y) => y.toFixed(5)).join(', ')}`)
+
+  ok(ys[0] > CARD_HALF.z - 0.0008, 'bottom card is not pushed below the felt', `y=${ys[0].toFixed(5)}`)
+
+  // Each successive card must sit at least most of a thickness higher.
+  let minGap = Infinity
+  for (let i = 1; i < ys.length; i++) minGap = Math.min(minGap, ys[i] - ys[i - 1])
+  ok(minGap > THICK * 0.55, 'no card sinks through the one below', `min gap=${minGap.toFixed(5)} vs thickness=${THICK}`)
+
+  const topExpected = CARD_HALF.z + THICK * (n - 1)
+  ok(
+    Math.abs(ys[n - 1] - topExpected) < THICK * 1.6,
+    'stack height matches card count',
+    `top=${ys[n - 1].toFixed(5)} expected≈${topExpected.toFixed(5)}`,
+  )
+  ok(
+    cards.every((c) => c.asleep),
+    'whole stack came to rest',
+    `${cards.filter((c) => c.asleep).length}/${n} asleep`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+section('3. A settled card does not creep or jitter')
+// ---------------------------------------------------------------------------
+{
+  const w = makeWorld()
+  const card = w.createCard(CARD_HALF, CARD_MASS)
+  card.setTransform(0.1, 0.02, -0.05, FLAT)
+  run(w, 3)
+
+  const before = { x: card.p.x, y: card.p.y, z: card.p.z }
+  // Force it awake and keep simulating: a stable solver leaves it where it is.
+  card.wake()
+  run(w, 3)
+  const drift = Math.hypot(card.p.x - before.x, card.p.y - before.y, card.p.z - before.z)
+  ok(drift < 0.0015, 'no drift after being re-woken', `drift=${(drift * 1000).toFixed(3)}mm`)
+}
+
+// ---------------------------------------------------------------------------
+section('4. Thrown cards land naturally and the rail contains them')
+// ---------------------------------------------------------------------------
+{
+  const w = makeWorld()
+  const card = w.createCard(CARD_HALF, CARD_MASS)
+  card.setTransform(0, 0.25, -0.3, FLAT)
+  // A firm forward throw with some spin, as if flicked from the hand.
+  card.v.x = 0.4
+  card.v.y = 0.1
+  card.v.z = 1.9
+  card.w.y = 7
+
+  run(w, 6)
+
+  const r = Math.hypot(card.p.x, card.p.z)
+  ok(card.p.y > -0.01, 'did not fall through the table', `y=${card.p.y.toFixed(5)}`)
+  ok(r < TABLE.railRadius + 0.06, 'stayed on the table', `r=${r.toFixed(4)}`)
+  ok(card.asleep, 'settled')
+  console.log(`     landed at x=${card.p.x.toFixed(3)} z=${card.p.z.toFixed(3)}, r=${r.toFixed(3)}`)
+}
+
+// ---------------------------------------------------------------------------
+section('5. Orientation is never forced — a tilted release stays tilted')
+// ---------------------------------------------------------------------------
+{
+  // Drop a card onto a sloped pile and confirm it does not snap axis-aligned.
+  const w = makeWorld()
+  const base = w.createCard(CARD_HALF, CARD_MASS)
+  base.setTransform(0, CARD_HALF.z, 0, FLAT)
+  base.mode = BodyMode.Dynamic
+
+  const leaner = w.createCard(CARD_HALF, CARD_MASS)
+  // Land it half-on the base card so it must come to rest at an angle.
+  const tilted = mulQuat(axisAngle(0, 1, 0, 0.6), FLAT)
+  leaner.setTransform(0.03, 0.06, 0.0, tilted)
+
+  run(w, 5)
+
+  // Yaw must be preserved: nothing in the pipeline rewrites rotation.
+  const yaw = yawOf(leaner.q)
+  ok(Math.abs(yaw) > 0.2, 'kept its arbitrary yaw instead of being aligned', `yaw=${yaw.toFixed(3)} rad`)
+  ok(leaner.p.y > base.p.y, 'ended up above the card it landed on', `${leaner.p.y.toFixed(5)} > ${base.p.y.toFixed(5)}`)
+  console.log(`     resting yaw=${yaw.toFixed(3)}rad (${((yaw * 180) / Math.PI).toFixed(1)}°)`)
+}
+
+// ---------------------------------------------------------------------------
+section('6. Energy never grows — the solver cannot explode')
+// ---------------------------------------------------------------------------
+{
+  // A tableful of cards dropped into a heap: the realistic worst case for Peril.
+  const w = makeWorld()
+  for (let i = 0; i < 12; i++) {
+    const c = w.createCard(CARD_HALF, CARD_MASS)
+    const r = Math.sin(i * 12.9898) * 43758.5453
+    const f = r - Math.floor(r)
+    c.setTransform((f - 0.5) * 0.1, 0.04 + i * 0.02, (f - 0.5) * 0.1, FLAT)
+  }
+  const dt = 1 / 240
+  let peakKe = 0
+  let settledAt = -1
+  for (let i = 0; i < 240 * 18; i++) {
+    w.advance(dt)
+    let ke = 0
+    for (const b of w.bodies) ke += b.v.x ** 2 + b.v.y ** 2 + b.v.z ** 2
+    if (i > 60) peakKe = Math.max(peakKe, ke)
+    if (settledAt < 0 && w.bodies.every((b) => b.asleep)) settledAt = i / 240
+  }
+  let ke = 0
+  for (const b of w.bodies) ke += b.v.x ** 2 + b.v.y ** 2 + b.v.z ** 2
+
+  ok(settledAt > 0, 'the whole heap eventually falls asleep', `at ${settledAt.toFixed(1)}s`)
+  ok(ke < 1e-6, 'kinetic energy decayed to rest', `ke=${ke.toExponential(2)}`)
+  ok(peakKe < 1, 'energy never ran away', `peak ke=${peakKe.toExponential(2)}`)
+  const maxY = Math.max(...w.bodies.map((b) => b.p.y))
+  ok(maxY < 0.05, 'nothing was launched', `highest card y=${maxY.toFixed(4)}`)
+  ok(
+    w.bodies.every((b) => Number.isFinite(b.p.x) && Number.isFinite(b.p.y) && Number.isFinite(b.q.w)),
+    'no NaN in the state',
+  )
+}
+
+// ---------------------------------------------------------------------------
+section('7. Grab drive follows the cursor and collides on the way')
+// ---------------------------------------------------------------------------
+{
+  const w = makeWorld()
+  const card = w.createCard(CARD_HALF, CARD_MASS)
+  card.setTransform(0, 0.2, -0.2, FLAT)
+
+  // Pinch near a corner, so the card should hang and swing from that point.
+  w.beginGrab(card, v3(0.02, 0.2 + CARD_HALF.z, -0.23))
+
+  // Sweep the target across the table.
+  const dt = 1 / 240
+  for (let i = 0; i < 240 * 1.5; i++) {
+    const t = i / (240 * 1.5)
+    w.updateGrab(card, v3(-0.15 + t * 0.3, 0.12, -0.2 + t * 0.35))
+    w.advance(dt)
+  }
+  const gx = 0.15
+  const gz = 0.15
+  const err = Math.hypot(card.p.x - gx, card.p.z - gz)
+  ok(err < 0.05, 'tracked the cursor', `xz error=${(err * 1000).toFixed(1)}mm`)
+  ok(card.mode === BodyMode.Grabbed, 'still grabbed')
+
+  // Now push the target *below* the table: contacts must win.
+  for (let i = 0; i < 240; i++) {
+    w.updateGrab(card, v3(0.15, -0.12, 0.15))
+    w.advance(dt)
+  }
+  ok(card.p.y > -0.005, 'could not be dragged through the felt', `y=${card.p.y.toFixed(5)}`)
+
+  // Release while moving: the throw velocity is whatever it already had.
+  w.updateGrab(card, v3(0.15, 0.1, 0.15))
+  w.advance(dt)
+  const speedBefore = Math.hypot(card.v.x, card.v.y, card.v.z)
+  w.endGrab(card)
+  ok(card.mode === BodyMode.Dynamic, 'released to dynamic')
+  ok(speedBefore > 0.05, 'carried real momentum into the release', `speed=${speedBefore.toFixed(3)} m/s`)
+  run(w, 4)
+  ok(card.asleep && card.p.y > 0, 'settled after release', `y=${card.p.y.toFixed(5)}`)
+}
+
+// ---------------------------------------------------------------------------
+section('8. Held cards are inert')
+// ---------------------------------------------------------------------------
+{
+  const w = makeWorld()
+  const held = w.createCard(CARD_HALF, CARD_MASS)
+  held.mode = BodyMode.Held
+  held.setTransform(0, 0.5, -0.4, FLAT)
+  run(w, 2)
+  ok(Math.abs(held.p.y - 0.5) < 1e-9, 'a held card does not fall', `y=${held.p.y}`)
+}
+
+// ---------------------------------------------------------------------------
+section('9. Determinism: identical inputs give an identical checksum')
+// ---------------------------------------------------------------------------
+{
+  function scenario(): number {
+    const w = makeWorld()
+    for (let i = 0; i < 8; i++) {
+      const c = w.createCard(CARD_HALF, CARD_MASS)
+      // Deterministic pseudo-random placement.
+      const s = Math.sin(i * 12.9898) * 43758.5453
+      const f = s - Math.floor(s)
+      c.setTransform((f - 0.5) * 0.15, 0.05 + i * 0.025, (f - 0.5) * 0.1, axisAngle(1, 0, 0, -Math.PI / 2 + f * 0.4))
+      c.v.x = (f - 0.5) * 0.4
+      c.w.y = (f - 0.5) * 6
+    }
+    run(w, 5)
+    return w.checksum()
+  }
+  const a = scenario()
+  const b = scenario()
+  ok(a === b, 'checksums match across runs', `${a} === ${b}`)
+}
+
+// ---------------------------------------------------------------------------
+section('10. Snapshot round-trip (for authoritative networked play)')
+// ---------------------------------------------------------------------------
+{
+  const w = makeWorld()
+  for (let i = 0; i < 6; i++) {
+    const c = w.createCard(CARD_HALF, CARD_MASS)
+    c.setTransform(i * 0.01, 0.05 + i * 0.02, 0, FLAT)
+  }
+  run(w, 2)
+  const snap = w.serialize()
+
+  const w2 = makeWorld()
+  for (let i = 0; i < 6; i++) w2.createCard(CARD_HALF, CARD_MASS)
+  w2.applySnapshot(snap)
+
+  let maxErr = 0
+  for (let i = 0; i < w.bodies.length; i++) {
+    maxErr = Math.max(
+      maxErr,
+      Math.abs(w.bodies[i].p.x - w2.bodies[i].p.x),
+      Math.abs(w.bodies[i].p.y - w2.bodies[i].p.y),
+      Math.abs(w.bodies[i].p.z - w2.bodies[i].p.z),
+    )
+  }
+  ok(maxErr < 1e-12, 'snapshot reproduces state exactly', `max err=${maxErr.toExponential(1)}`)
+
+  // Resuming stays visually identical, but not bit-identical: the warm-start
+  // impulse cache is a solver accelerator, not authoritative state, so it is
+  // deliberately left out of the snapshot. A restored client re-derives it over
+  // the next step or two. Assert that the transient is imperceptible.
+  run(w, 1)
+  run(w2, 1)
+  let resumeErr = 0
+  for (let i = 0; i < w.bodies.length; i++) {
+    resumeErr = Math.max(
+      resumeErr,
+      Math.abs(w.bodies[i].p.x - w2.bodies[i].p.x),
+      Math.abs(w.bodies[i].p.y - w2.bodies[i].p.y),
+      Math.abs(w.bodies[i].p.z - w2.bodies[i].p.z),
+    )
+  }
+  ok(resumeErr < 0.0005, 'resumes within half a millimetre', `max err=${(resumeErr * 1000).toFixed(4)}mm`)
+}
+
+// ---------------------------------------------------------------------------
+section('11. Performance')
+// ---------------------------------------------------------------------------
+{
+  for (const count of [10, 26, 52]) {
+    const w = makeWorld()
+    for (let i = 0; i < count; i++) {
+      const c = w.createCard(CARD_HALF, CARD_MASS)
+      const a = (i / count) * Math.PI * 2
+      c.setTransform(Math.cos(a) * 0.08, 0.02 + i * 0.006, Math.sin(a) * 0.08, FLAT)
+    }
+    // Busiest phase: everything in the air and colliding.
+    const dt = 1 / 60
+    let worst = 0
+    let total = 0
+    const frames = 180
+    for (let i = 0; i < frames; i++) {
+      w.advance(dt)
+      worst = Math.max(worst, w.stats.stepMs)
+      total += w.stats.stepMs
+    }
+    const settled = w.bodies.filter((b) => b.asleep).length
+    // A 60fps frame is 16.6ms; physics should be a small slice of that.
+    console.log(
+      `     ${String(count).padStart(2)} cards: avg ${(total / frames).toFixed(2)}ms/frame, worst ${worst.toFixed(2)}ms, ${settled}/${count} asleep at end`,
+    )
+    ok(total / frames < 6, `${count} cards average under 6ms/frame`, `${(total / frames).toFixed(2)}ms`)
+    ok(
+      w.bodies.every((b) => Number.isFinite(b.p.y) && Math.abs(b.p.y) < 1),
+      `${count} cards stayed stable`,
+    )
+  }
+
+  // Sleeping must actually pay off: a settled table should cost ~nothing.
+  const w = makeWorld()
+  for (let i = 0; i < 14; i++) {
+    const c = w.createCard(CARD_HALF, CARD_MASS)
+    c.setTransform((i % 4) * 0.05 - 0.075, 0.01 + i * 0.004, Math.floor(i / 4) * 0.05 - 0.05, FLAT)
+  }
+  run(w, 6)
+  let idle = 0
+  for (let i = 0; i < 120; i++) {
+    w.advance(1 / 60)
+    idle += w.stats.stepMs
+  }
+  const asleep = w.bodies.filter((b) => b.asleep).length
+  console.log(`     14 settled cards: ${(idle / 120).toFixed(3)}ms/frame, ${asleep}/14 asleep`)
+  ok(asleep === 14, 'a laid-out table fully settles', `${asleep}/14`)
+  ok(idle / 120 < 0.2, 'settled cards cost almost nothing', `${(idle / 120).toFixed(3)}ms`)
+}
+
+// --- helpers ---------------------------------------------------------------
+
+function mulQuat(a: Q4, b: Q4): Q4 {
+  return q4(
+    a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+    a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+  )
+}
+
+/** Yaw of the card's in-plane axis, i.e. how it is spun on the table. */
+function yawOf(q: Q4): number {
+  // Card's local +X in world space.
+  const x = 1 - 2 * (q.y * q.y + q.z * q.z)
+  const z = 2 * (q.x * q.y * 0 + q.x * q.z - q.w * q.y) * -1
+  return Math.atan2(z, x)
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  `\n${failures === 0 ? '\x1b[32m' : '\x1b[31m'}${checks - failures}/${checks} checks passed\x1b[0m\n`,
+)
+process.exit(failures === 0 ? 0 : 1)

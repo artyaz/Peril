@@ -1,34 +1,20 @@
 import * as THREE from 'three'
-import { Spring } from './spring'
 
-// --- Card dimensions (meters) ---
-// Slightly thicker than real cards for visual boldness in 3D
+/**
+ * Card visuals. Purely presentational — every transform on screen comes from the
+ * physics body, so nothing in here decides where a card goes.
+ */
+
+// Real playing card dimensions, in metres. The solver uses these same numbers,
+// so mass, gravity and air drag all behave at true scale.
 export const CARD_W = 0.063
 export const CARD_H = 0.088
 export const CARD_D = 0.002
+export const CARD_MASS = 0.0025
 
 const CORNER_R = 0.005
 
-export type CardMesh = THREE.Group & {
-  userData: {
-    lift: Spring
-    hoverScale: Spring
-    tiltX: Spring
-    tiltZ: Spring
-    posX: Spring
-    posY: Spring
-    posZ: Spring
-    baseY: number
-    baseRotX: number
-    baseRotY: number
-    baseRotZ: number
-    index: number
-    dragging: boolean
-    hovered: boolean
-  }
-}
-
-function createRoundedRectShape(w: number, h: number, r: number): THREE.Shape {
+function roundedRect(w: number, h: number, r: number): THREE.Shape {
   const s = new THREE.Shape()
   const hw = w / 2
   const hh = h / 2
@@ -44,89 +30,79 @@ function createRoundedRectShape(w: number, h: number, r: number): THREE.Shape {
   return s
 }
 
-const shape = createRoundedRectShape(CARD_W, CARD_H, CORNER_R)
-const cardGeometry = new THREE.ExtrudeGeometry(shape, {
-  depth: CARD_D,
-  bevelEnabled: true,
-  bevelThickness: 0.0004,
-  bevelSize: 0.0004,
-  bevelSegments: 3,
-  curveSegments: 12,
-})
-cardGeometry.translate(0, 0, -CARD_D / 2)
-cardGeometry.computeVertexNormals()
+/**
+ * Build the card geometry as a single mesh with three material groups: front
+ * face, back face, and edges.
+ *
+ * ExtrudeGeometry lumps both caps into one group, which would force a separate
+ * overlay mesh just to give the back a different colour — an extra object and
+ * an extra matrix update for every card on the table. Splitting the cap
+ * triangles by facing direction keeps each card a single Object3D.
+ */
+function buildCardGeometry(): THREE.BufferGeometry {
+  const geo = new THREE.ExtrudeGeometry(roundedRect(CARD_W, CARD_H, CORNER_R), {
+    depth: CARD_D,
+    bevelEnabled: true,
+    bevelThickness: 0.0004,
+    bevelSize: 0.0004,
+    bevelSegments: 2,
+    curveSegments: 10,
+  })
+  geo.translate(0, 0, -CARD_D / 2)
+  geo.computeVertexNormals()
 
-// Materials — bold contrast
-const faceMat = new THREE.MeshStandardMaterial({
-  color: '#fafaf6',
-  roughness: 0.28,
+  const capGroup = geo.groups[0]
+  const sideGroup = geo.groups[1]
+  const normals = geo.getAttribute('normal')
+
+  const front: number[] = []
+  const back: number[] = []
+  for (let i = capGroup.start; i < capGroup.start + capGroup.count; i += 3) {
+    // Non-indexed: each run of three vertices is one triangle.
+    ;(normals.getZ(i) >= 0 ? front : back).push(i, i + 1, i + 2)
+  }
+  const sides: number[] = []
+  for (let i = sideGroup.start; i < sideGroup.start + sideGroup.count; i++) sides.push(i)
+
+  geo.setIndex([...front, ...back, ...sides])
+  geo.clearGroups()
+  geo.addGroup(0, front.length, 0)
+  geo.addGroup(front.length, back.length, 1)
+  geo.addGroup(front.length + back.length, sides.length, 2)
+  geo.computeBoundingSphere()
+  return geo
+}
+
+const cardGeometry = buildCardGeometry()
+
+/** Shared across every card, so the GPU sees one set of uniforms. */
+const faceMaterial = new THREE.MeshStandardMaterial({
+  color: '#f7f6f1',
+  roughness: 0.32,
   metalness: 0.0,
 })
-const edgeMat = new THREE.MeshStandardMaterial({
-  color: '#d4d4cc',
-  roughness: 0.45,
+const backMaterial = new THREE.MeshStandardMaterial({
+  color: '#7a1f2b',
+  roughness: 0.38,
+  metalness: 0.05,
+})
+const edgeMaterial = new THREE.MeshStandardMaterial({
+  color: '#d8d6cd',
+  roughness: 0.5,
   metalness: 0.02,
 })
-const backMat = new THREE.MeshStandardMaterial({
-  color: '#16162a',
-  roughness: 0.35,
-  metalness: 0.08,
-})
 
-// Back face plane geometry (inset from card edge)
-const backPlaneGeo = new THREE.PlaneGeometry(CARD_W - 0.008, CARD_H - 0.008)
+const materials = [faceMaterial, backMaterial, edgeMaterial]
 
-export function createCard(): CardMesh {
-  const group = new THREE.Group() as CardMesh
-
-  // Extruded body: material[0] = caps (front+back), material[1] = sides
-  const body = new THREE.Mesh(cardGeometry, [faceMat, edgeMat])
-  body.castShadow = true
-  body.receiveShadow = true
-  group.add(body)
-
-  // Dark back face overlay on -Z side
-  const back = new THREE.Mesh(backPlaneGeo, backMat)
-  back.position.z = -(CARD_D / 2 + 0.0005)
-  back.rotation.y = Math.PI
-  group.add(back)
-
-  group.userData = {
-    lift: new Spring(0, 340, 28),
-    hoverScale: new Spring(1, 300, 26),
-    tiltX: new Spring(0, 280, 24),
-    tiltZ: new Spring(0, 280, 24),
-    posX: new Spring(0, 260, 24),
-    posY: new Spring(0, 260, 24),
-    posZ: new Spring(0, 260, 24),
-    baseY: 0,
-    baseRotX: 0,
-    baseRotY: 0,
-    baseRotZ: 0,
-    index: 0,
-    dragging: false,
-    hovered: false,
-  }
-
-  return group
+export function createCardMesh(): THREE.Mesh {
+  const mesh = new THREE.Mesh(cardGeometry, materials)
+  mesh.castShadow = true
+  mesh.receiveShadow = true
+  // Transforms are written every frame from the physics body, so let Three skip
+  // its own bookkeeping and update the matrix explicitly.
+  mesh.matrixAutoUpdate = false
+  return mesh
 }
 
-export function updateCardMotion(card: CardMesh, dt: number) {
-  const ud = card.userData
-  if (ud.dragging) return
-
-  const targetLift = ud.hovered ? 0.022 : 0
-  const targetScale = ud.hovered ? 1.15 : 1
-  const targetTiltX = ud.hovered ? -0.1 : 0
-  const targetTiltZ = ud.hovered ? 0.025 : 0
-
-  const lift = ud.lift.animateTo(targetLift, dt)
-  const scale = ud.hoverScale.animateTo(targetScale, dt)
-  const tx = ud.tiltX.animateTo(targetTiltX, dt)
-  const tz = ud.tiltZ.animateTo(targetTiltZ, dt)
-
-  card.position.y = ud.baseY + lift
-  card.scale.setScalar(scale)
-  card.rotation.x = ud.baseRotX + tx
-  card.rotation.z = ud.baseRotZ + tz
-}
+/** Half-extents matching the geometry, for the solver. */
+export const CARD_HALF = { x: CARD_W / 2, y: CARD_H / 2, z: CARD_D / 2 }
