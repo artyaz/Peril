@@ -185,8 +185,24 @@ export const TUNING = {
 
   gravity: -9.81,
 
-  /** Contact solver iterations. Thin stacks need a few passes to firm up. */
+  /**
+   * Contact solver iterations — a floor, not a fixed count. See
+   * `iterationsPerAwakeBody`.
+   */
   velocityIterations: 8,
+  /**
+   * Extra velocity iterations per awake body, and the ceiling on them.
+   *
+   * Left at zero. Gauss-Seidel does need roughly as many sweeps as a stack is
+   * tall to carry support to the top, and before the warm-start cache was fixed
+   * this mattered enormously — 24 cards needed 32 iterations to stand up at all.
+   * With warm starting actually persisting, the accumulated impulses carry that
+   * load across substeps instead, and 24 cards hold at the base 8. Scaling the
+   * count up now buys nothing and costs a great deal: a table of 52 loose cards
+   * goes from 9ms a frame to 38ms for no improvement in how they settle.
+   */
+  iterationsPerAwakeBody: 0,
+  maxVelocityIterations: 8,
   /** Overlap-resolution passes, run on the pseudo-velocity channel. */
   positionIterations: 6,
   /**
@@ -205,6 +221,15 @@ export const TUNING = {
    * were doing most of the work holding the stack up.
    */
   sortContacts: true,
+  /**
+   * Sweep contacts lowest-first, and only ever in that direction.
+   *
+   * Alternating the sweep is the textbook way to keep Gauss-Seidel unbiased, and
+   * here it is actively destructive: each downward pass unwinds the support the
+   * upward pass just propagated. Same iteration count, 31% of stack height
+   * against 99%.
+   */
+  sweepAlternate: false,
   /**
    * Bottom-up passes that pin the supporting card and lift only what rests on
    * it.
@@ -590,11 +615,12 @@ export class World {
   private contactOrder: number[] = []
 
   private warmSlot = new Map<number, number>()
-  private warmData = new Float64Array(4 * 512)
+  private warmData = new Float64Array(4 * 2048)
   private warmUsed = 0
+  private warmSweptAt = 0
 
   /** Diagnostics, read by the debug HUD. */
-  stats = { awake: 0, contacts: 0, substeps: 0, stepMs: 0 }
+  stats = { awake: 0, contacts: 0, substeps: 0, stepMs: 0, iterations: 0 }
 
   constructor(table: TableSpec) {
     this.table = table
@@ -1291,8 +1317,15 @@ export class World {
     }
 
     // Pass 1: real velocity. Stops motion and applies friction and bounce.
-    for (let it = 0; it < T.velocityIterations; it++) {
-      if (it & 1) {
+    // Iterations scale with how many bodies are actually awake, since that is
+    // what sets how far support has to travel.
+    const iterations = Math.max(
+      T.velocityIterations,
+      Math.min(T.maxVelocityIterations, Math.ceil(this.stats.awake * T.iterationsPerAwakeBody)),
+    )
+    this.stats.iterations = iterations
+    for (let it = 0; it < iterations; it++) {
+      if (T.sweepAlternate && it & 1) {
         for (let i = n - 1; i >= 0; i--) this.solveContactVelocity(this.contacts[order[i]], dt)
       } else {
         for (let i = 0; i < n; i++) this.solveContactVelocity(this.contacts[order[i]], dt)
@@ -1378,10 +1411,16 @@ export class World {
   }
 
   private storeWarmStart(): void {
-    // Compact the cache when it grows stale, so long sessions stay bounded.
-    if (this.warmSlot.size > 3000) {
-      this.warmSlot.clear()
-      this.warmUsed = 0
+    // Recycle stale entries instead of only ever appending.
+    //
+    // Slots used to be handed out until the pool ran dry and then refused, with
+    // a wholesale clear far too late to help. A 52-card deck carries some four
+    // hundred live contacts whose keys drift as corners and axes change, so the
+    // pool filled almost immediately and warm starting simply stopped for
+    // anything new. That put a ceiling on stack height no amount of extra
+    // iterations could lift, since warm starting is what holds a stack up.
+    if (this.tick - this.warmSweptAt > 240 || this.warmUsed >= this.warmData.length / 4) {
+      this.compactWarmStart()
     }
     const capacity = this.warmData.length / 4
     for (let i = 0; i < this.contactCount; i++) {
@@ -1398,6 +1437,35 @@ export class World {
       this.warmData[o + 2] = c.jt2
       this.warmData[o + 3] = this.tick
     }
+  }
+
+  /** Drop entries no contact has touched recently, reclaiming their slots. */
+  private compactWarmStart(): void {
+    this.warmSweptAt = this.tick
+    const keep = new Map<number, number>()
+    const next = new Float64Array(this.warmData.length)
+    let used = 0
+    for (const [key, slot] of this.warmSlot) {
+      const o = slot * 4
+      if (this.tick - this.warmData[o + 3] > 2) continue
+      const n = used * 4
+      next[n] = this.warmData[o]
+      next[n + 1] = this.warmData[o + 1]
+      next[n + 2] = this.warmData[o + 2]
+      next[n + 3] = this.warmData[o + 3]
+      keep.set(key, used)
+      used++
+    }
+    if (used > this.warmData.length / 8 && this.warmData.length < 4 * 65536) {
+      // Still tight after pruning: the scene genuinely needs a bigger pool.
+      const grown = new Float64Array(this.warmData.length * 2)
+      grown.set(next.subarray(0, used * 4))
+      this.warmData = grown
+    } else {
+      this.warmData = next
+    }
+    this.warmSlot = keep
+    this.warmUsed = used
   }
 
   /** Relative normal velocity at the contact, real or pseudo channel. */

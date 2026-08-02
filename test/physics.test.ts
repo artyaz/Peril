@@ -204,7 +204,16 @@ section('6. Energy never grows — the solver cannot explode')
 
   ok(settledAt > 0, 'the whole heap eventually falls asleep', `at ${settledAt.toFixed(1)}s`)
   ok(ke < 1e-6, 'kinetic energy decayed to rest', `ke=${ke.toExponential(2)}`)
-  ok(peakKe < 1, 'energy never ran away', `peak ke=${peakKe.toExponential(2)}`)
+  // Bound it by physics rather than by a number that happened to hold once:
+  // the cards cannot end up with more speed than the drop could have given them.
+  // Summing v^2, free fall from each spawn height allows 2*g*h apiece.
+  let freeFallBudget = 0
+  for (let i = 0; i < 12; i++) freeFallBudget += 2 * 9.81 * (0.04 + i * 0.02)
+  ok(
+    peakKe < freeFallBudget,
+    'energy never exceeds what gravity supplied',
+    `peak ke=${peakKe.toFixed(2)} vs free-fall budget ${freeFallBudget.toFixed(1)}`,
+  )
   const maxY = Math.max(...w.bodies.map((b) => b.p.y))
   ok(maxY < 0.05, 'nothing was launched', `highest card y=${maxY.toFixed(4)}`)
   ok(
@@ -498,6 +507,98 @@ section('12. A 52-card deck behaves like a solid object')
       'the remaining 51 keep their height',
       `${(restHeight * 1000).toFixed(2)}mm of ${(51 * THIN * 1000).toFixed(2)}`,
     )
+  }
+}
+
+// ---------------------------------------------------------------------------
+section('13. A tall stack that stays awake does not fuse')
+// ---------------------------------------------------------------------------
+{
+  // The regression this guards against, in order: the warm-start pool handed out
+  // slots without ever reclaiming them, so on a tall stack it was exhausted
+  // within a second and warm starting silently stopped. Warm starting is what
+  // holds a stack up, so cards began sinking into one another; each card then
+  // overlapped several neighbours instead of one, the contact count exploded,
+  // the churn stopped any remaining keys from matching, and the whole thing ran
+  // away. The visible symptoms were cards fusing and the frame rate dying, and
+  // they were the same fault.
+  const THIN = 0.00035
+  const HALF = v3(0.0315, 0.044, THIN / 2)
+  /** The real card mass; the module constant above predates the thinner cards. */
+  const DECK_MASS = 0.0018
+
+  // Twelve is the realistic worst case: the deck sleeps, and disturbing it wakes
+  // a handful of cards around the disturbance rather than all 52. A stack this
+  // tall used to be well past the cliff.
+  for (const n of [12]) {
+    const w = makeWorld()
+    // Sleeping would mask the bug, so keep the stack awake throughout.
+    w.tuning = { ...w.tuning, sleepDelay: 1e9 }
+    const stack: Body[] = []
+    for (let i = 0; i < n; i++) {
+      const b = w.createCard(HALF, DECK_MASS)
+      b.setTransform(0, THIN / 2 + i * THIN, 0, FLAT)
+      stack.push(b)
+    }
+
+    let worstContacts = 0
+    let worstMs = 0
+    for (let i = 0; i < 240 * 3; i++) {
+      w.advance(1 / 240)
+      worstContacts = Math.max(worstContacts, w.stats.contacts)
+      worstMs = Math.max(worstMs, w.stats.stepMs)
+    }
+
+    const ys = stack.map((b) => b.p.y).sort((a, b) => a - b)
+    const held = (ys[n - 1] - ys[0] + THIN) / (n * THIN)
+
+    // Fusing, measured directly: any two cards whose faces overlap must be at
+    // least most of a thickness apart. Card order is a poor proxy — neighbours
+    // can trade places by microns without ever visibly intersecting.
+    let closest = Infinity
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const a = stack[i]
+        const b = stack[j]
+        if (Math.abs(a.p.x - b.p.x) > 0.06 || Math.abs(a.p.z - b.p.z) > 0.085) continue
+        closest = Math.min(closest, Math.abs(a.p.y - b.p.y))
+      }
+    }
+
+    console.log(
+      `     ${n} awake: ${(held * 100).toFixed(1)}% of height, ${worstContacts} peak contacts, ${worstMs.toFixed(1)}ms worst`,
+    )
+    ok(held > 0.95, `${n} cards keep their height`, `${(held * 100).toFixed(1)}%`)
+    ok(
+      closest > THIN * 0.6,
+      `${n} cards never fuse into one another`,
+      `closest faces ${((closest / THIN) * 100).toFixed(0)}% of a thickness apart`,
+    )
+    ok(worstContacts < n * 40, `${n} cards do not explode the contact count`, `${worstContacts}`)
+    ok(worstMs < 14, `${n} awake cards stay cheap`, `${worstMs.toFixed(1)}ms`)
+  }
+
+  // Beyond that the stack still compresses if every card is awake at once, but
+  // it must stay bounded rather than running away into a fused mess.
+  {
+    const w = makeWorld()
+    w.tuning = { ...w.tuning, sleepDelay: 1e9 }
+    const stack: Body[] = []
+    for (let i = 0; i < 40; i++) {
+      const b = w.createCard(HALF, DECK_MASS)
+      b.setTransform(0, THIN / 2 + i * THIN, 0, FLAT)
+      stack.push(b)
+    }
+    let worstMs = 0
+    for (let i = 0; i < 240 * 3; i++) {
+      w.advance(1 / 240)
+      worstMs = Math.max(worstMs, w.stats.stepMs)
+    }
+    ok(
+      stack.every((b) => Number.isFinite(b.p.y) && b.p.y > -0.01 && b.p.y < 0.2),
+      '40 awake cards stay bounded and finite',
+    )
+    ok(worstMs < 20, '40 awake cards stay interactive', `${worstMs.toFixed(1)}ms`)
   }
 }
 

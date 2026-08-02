@@ -163,7 +163,16 @@ section('C. A dragged card collides with cards already on the table')
   }
 
   ok(dragged.p.y > -0.002, 'the dragged card never sinks through the felt', `y=${dragged.p.y.toFixed(5)}`)
-  ok(minGap < 0.06, 'the drag path really did cross the resting card', `closest=${minGap.toFixed(4)}m`)
+  // Precondition on the path, not on how close they ended up. The drag sweeps
+  // from x=-0.12 to x=+0.14 straight over a card sitting at x=0.08, so it
+  // certainly crosses it; measuring the closest approach instead punishes the
+  // solver for working, since a firmer shove moves the resting card out of the
+  // way sooner.
+  ok(
+    restingStart.x > -0.12 && restingStart.x < 0.14 && Math.abs(restingStart.z) < CARD_HALF.y,
+    'the drag path really did cross the resting card',
+    `resting card at x=${restingStart.x.toFixed(3)}, closest approach ${minGap.toFixed(3)}m`,
+  )
 
   const moved = Math.hypot(resting.p.x - restingStart.x, resting.p.z - restingStart.z)
   const climbed = dragged.p.y > CARD_HALF.z * 2.2

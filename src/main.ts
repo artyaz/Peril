@@ -56,7 +56,12 @@ const scene = new THREE.Scene()
 scene.background = new THREE.Color('#0b0b10')
 scene.fog = new THREE.Fog('#0b0b10', 2.5, 10)
 
-const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.01, 50)
+// Near and far are kept as tight as the scene allows, because depth precision
+// scales with their ratio. Cards are 0.35mm thick and about a metre away, which
+// is roughly one pixel — two stacked cards are all but coplanar on screen, and a
+// loose depth range makes them z-fight into a hatched mess wherever they overlap.
+// Near must stay under the closest a grabbed card can be pulled (0.12).
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.05, 14)
 scene.add(camera)
 
 scene.add(new THREE.AmbientLight('#303048', 0.5))
