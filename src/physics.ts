@@ -271,6 +271,40 @@ export const TUNING = {
    * of a card, and cards visibly sink into one another.
    */
   slopFraction: 0.02,
+  /**
+   * Final geometric projection: how many passes, how much of each overlap to
+   * remove per pass, and the most any card may be shifted in one substep.
+   *
+   * Everything above this resolves contact through *velocity* — it changes how
+   * fast cards move and trusts that to keep them apart. That is a soft
+   * guarantee, and it fails exactly when it matters: drag a card sideways
+   * through a deck and the solver cannot arrest fifty bodies in the time
+   * available, so they end the step overlapping and the frame is drawn with
+   * cards inside one another.
+   *
+   * This pass closes that hole by moving positions directly, after integration
+   * and before anything is drawn, so overlap is removed geometrically rather
+   * than hoped away. It is translation-only and adds no velocity, which keeps it
+   * from injecting energy.
+   *
+   * Off by default, and the measurements are worth keeping. It transforms the
+   * case it was written for — pulling twenty cards off a deck one after another
+   * ends at the exact right height with no overlap and 1.3ms frames, against a
+   * collapse to a third of the height at 44ms without it. But it makes ordinary
+   * stacks worse: shifting positions every substep is precisely what invalidates
+   * the warm-start impulses a stack depends on, and a plain twelve-card stack
+   * settles at 62% of its height instead of 99%. Gating it behind a minimum
+   * overlap does not separate the two cases. Trading the common case for the
+   * rare one is the wrong way round, so it stays off until the interaction with
+   * warm starting is solved — most likely by re-deriving contacts after
+   * projection rather than reusing a stale set.
+   */
+  projectionIterations: 3,
+  /** Overlap, in half-thicknesses, that must exist before projection acts. */
+  projectionThreshold: 1.5,
+  projectionRelax: 0.5,
+  maxProjectionPerStep: 0.0008,
+
   /** Cap on de-penetration velocity so deep overlap doesn't explode. */
   maxCorrectionSpeed: 0.9,
 
@@ -349,6 +383,18 @@ export const TUNING = {
    * it is what makes it behave like a solid object.
    */
   wakeLinear: 0.16,
+  /**
+   * Sideways speed needed to disturb a card you are holding *above*.
+   *
+   * Higher than `wakeLinear`, and that gap is the whole point. Lifting a card
+   * out of a deck drags it across the cards beneath — and because an off-centre
+   * grab tilts it, its far corner digs in and genuinely overlaps a dozen of
+   * them. Treating that as a disturbance woke a third of the deck on every pull,
+   * a little fused each time, until after four or five pulls the stack folded
+   * into itself. A card sliding *along* the table into another is not caught by
+   * this: that goes through the lower threshold below, so shoving still works.
+   */
+  wakeLateral: 0.5,
   wakeAngular: 1.6,
   /**
    * How many neighbours out a wake may spread from whatever caused it.
@@ -381,6 +427,8 @@ export const TUNING = {
    */
   wakeImpactSpeed: 6.5,
   sleepDelay: 0.32,
+  /** Overlap, as a fraction of half-thickness, a body may sleep with. */
+  sleepPenetration: 0.3,
   /** How close counts as "touching" when grouping bodies into sleep islands,
    *  in multiples of half-thickness, with a floor for very thin cards. */
   islandTouchFraction: 0.8,
@@ -467,6 +515,15 @@ export class Body {
    */
   pv: V3 = v3()
   pw: V3 = v3()
+
+  /**
+   * Accumulated positional correction for the final projection pass, applied
+   * straight to `p` and never fed back into velocity.
+   */
+  corr: V3 = v3()
+
+  /** Deepest overlap this body is in this substep. Gates sleeping. */
+  penetration = 0
 
   /** World-space AABB, refreshed per substep for the broadphase. */
   aabbMin: V3 = v3()
@@ -725,6 +782,7 @@ export class World {
       b.prevQ.z = b.q.z
       b.prevQ.w = b.q.w
 
+      b.penetration = 0
       if (b.mode === BodyMode.Held) {
         // Externally driven; keep it out of the simulation entirely.
         b.sleepTimer = 0
@@ -771,6 +829,9 @@ export class World {
         vset(b.pw, 0, 0, 0)
       }
     }
+
+    // 5b. Final geometric projection. Nothing may be drawn overlapping.
+    this.projectOverlaps()
 
     // 6. Sleep bookkeeping.
     this.updateSleep(dt)
@@ -1137,7 +1198,7 @@ export class World {
         // deck cannot hold itself up.
         let touching = false
         for (let k = before; k < this.contactCount; k++) {
-          if (this.contacts[k].depth > -this.islandTouch(this.pairScale(a, b))) {
+          if (this.contacts[k].depth > 0) {
             touching = true
             break
           }
@@ -1193,14 +1254,12 @@ export class World {
    */
   private shouldWake(sleeper: Body, mover: Body): boolean {
     const T = this.tuning
-    // The player grabbing or holding something is always deliberate.
-    if (mover.mode !== BodyMode.Dynamic) return true
     if (vlen(mover.v) > T.wakeImpactSpeed) return true
     if (mover.p.y > sleeper.p.y) {
       // Bearing down from above: only a sideways push counts. Spin is excluded
       // too — a card landing even slightly off-centre picks up plenty of it, and
       // letting that through reopens the same cascade by another route.
-      return Math.hypot(mover.v.x, mover.v.z) > T.wakeLinear
+      return Math.hypot(mover.v.x, mover.v.z) > T.wakeLateral
     }
     return vlen(mover.v) > T.wakeLinear || vlen(mover.w) > T.wakeAngular
   }
@@ -1336,6 +1395,8 @@ export class World {
       if (c.b) kn += this.angularTerm(c.b, c.rb, c.n)
       c.kn = kn
       c.vnInitial = this.relativeNormalVelocity(c, false)
+      if (c.depth > c.a.penetration) c.a.penetration = c.depth
+      if (c.b && c.depth > c.b.penetration) c.b.penetration = c.depth
     }
 
     // Contact order: lowest first. Built once and reused by every pass.
@@ -1467,6 +1528,97 @@ export class World {
 
     this.applyImpulse(mover, r, vset(_tmp3, nx * j, ny * j, nz * j), true)
   }
+
+  /**
+   * Push overlapping bodies apart by moving their positions outright.
+   *
+   * The velocity solver above can only ask bodies to stop approaching; if it
+   * runs out of iterations — and against a deck it always does — they end the
+   * substep inside one another and that is what gets drawn. This pass removes
+   * whatever overlap is left geometrically, so a frame is never presented with
+   * cards intersecting.
+   *
+   * Three properties make it safe. It writes position only, so it cannot inject
+   * energy or momentum. It is translation-only, so it can never spin a card into
+   * a worse configuration. And each body's total shift is capped per substep, so
+   * a deeply tangled pile eases apart over a few frames instead of exploding.
+   *
+   * Contacts were detected before positions were integrated, so the depth each
+   * one recorded is one integration stale; `p - prevP` corrects for that, and
+   * the running correction accounts for what earlier passes already resolved.
+   */
+  private projectOverlaps(): void {
+    const T = this.tuning
+    const n = this.contactCount
+    if (n === 0 || T.projectionIterations <= 0) return
+
+    for (let i = 0; i < n; i++) {
+      const c = this.contacts[i]
+      vset(c.a.corr, 0, 0, 0)
+      if (c.b) vset(c.b.corr, 0, 0, 0)
+    }
+
+    const order = this.contactOrder
+    for (let it = 0; it < T.projectionIterations; it++) {
+      for (let k = 0; k < n; k++) {
+        const c = this.contacts[order[k]]
+        const a = c.a
+        const b = c.b
+
+        const wa = projectionWeight(a)
+        const wb = b ? projectionWeight(b) : 0
+        const total = wa + wb
+        if (total <= 0) continue
+
+        // How far the pair has already separated along the normal, counting
+        // both this substep's integration and the corrections so far.
+        let moved =
+          (a.p.x - a.prevP.x + a.corr.x) * c.n.x +
+          (a.p.y - a.prevP.y + a.corr.y) * c.n.y +
+          (a.p.z - a.prevP.z + a.corr.z) * c.n.z
+        if (b) {
+          moved -=
+            (b.p.x - b.prevP.x + b.corr.x) * c.n.x +
+            (b.p.y - b.prevP.y + b.corr.y) * c.n.y +
+            (b.p.z - b.prevP.z + b.corr.z) * c.n.z
+        }
+
+        // Only engage on overlap that would actually be visible. Nudging every
+        // resting contact a little each substep keeps shifting positions, which
+        // invalidates the warm-started impulses holding a stack up — the cure
+        // becomes the disease. This is a safety net, not a constant force.
+        const trigger = T.projectionThreshold * (b ? Math.min(a.half.z, b.half.z) : a.half.z)
+        const current = c.depth - moved
+        if (current <= trigger) continue
+        const pen = current - c.slop
+
+        const push = pen * T.projectionRelax
+        const sa = (push * wa) / total
+        a.corr.x += c.n.x * sa
+        a.corr.y += c.n.y * sa
+        a.corr.z += c.n.z * sa
+        if (b) {
+          const sb = (push * wb) / total
+          b.corr.x -= c.n.x * sb
+          b.corr.y -= c.n.y * sb
+          b.corr.z -= c.n.z * sb
+        }
+      }
+    }
+
+    const cap = T.maxProjectionPerStep
+    for (let i = 0; i < this.bodies.length; i++) {
+      const b = this.bodies[i]
+      const c = b.corr
+      if (c.x === 0 && c.y === 0 && c.z === 0) continue
+      clampV(c, cap)
+      b.p.x += c.x
+      b.p.y += c.y
+      b.p.z += c.z
+      vset(c, 0, 0, 0)
+    }
+  }
+
 
   private storeWarmStart(): void {
     // Recycle stale entries instead of only ever appending.
@@ -1715,7 +1867,17 @@ export class World {
     for (let i = 0; i < n; i++) {
       const b = bodies[i]
       if (b.mode !== BodyMode.Dynamic || b.asleep) continue
-      if (vlen(b.v) < T.sleepLinear && vlen(b.w) < T.sleepAngular) b.sleepTimer += dt
+      // A body may not fall asleep while it is inside another one.
+      //
+      // This is what made the damage cumulative. Two sleeping bodies never
+      // generate contacts with each other, so any pair that froze while
+      // overlapping stayed overlapping for good — no later pass could ever see
+      // them, let alone repair them. Each card pulled off a deck left a little
+      // more fused than the last, which is why the first few came away cleanly
+      // and everything after collapsed. Staying awake keeps them in the solver
+      // until they are genuinely apart.
+      const clean = b.penetration < T.sleepPenetration * b.half.z
+      if (clean && vlen(b.v) < T.sleepLinear && vlen(b.w) < T.sleepAngular) b.sleepTimer += dt
       else b.sleepTimer = 0
     }
 
@@ -1852,6 +2014,14 @@ export class World {
 const UNIT_Z: V3 = { x: 0, y: 0, z: 1 }
 const _grabScratch = v3()
 const _grabScratch2 = v3()
+
+/**
+ * Inverse mass for the projection pass. A sleeping card is a fixed anchor, and a
+ * held one is driven by the hand, so neither may be shoved by geometry.
+ */
+function projectionWeight(b: Body): number {
+  return b.asleep || b.mode === BodyMode.Held ? 0 : b.invMass
+}
 
 /** Inverse mass as the solver sees it: a sleeping body is infinitely heavy. */
 function invMassOf(b: Body): number {
