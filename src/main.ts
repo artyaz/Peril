@@ -330,7 +330,11 @@ function cursorOverHand(): boolean {
   return clientPos.y > renderer.domElement.clientHeight * HAND_BAND
 }
 
+/** True while the fan is still sliding into place, so shadows keep redrawing. */
+let handSettling = false
+
 function layoutHand(dt: number): void {
+  handSettling = false
   const list = handCards()
   const total = list.length + (reorderSlot !== null ? 1 : 0)
   const smoothing = 1 - Math.exp(-16 * dt)
@@ -348,6 +352,7 @@ function layoutHand(dt: number): void {
     } else {
       card.slotPos.lerp(_v, smoothing)
       card.slotQuat.slerp(_q, smoothing)
+      if (card.slotPos.distanceToSquared(_v) > 1e-10) handSettling = true
     }
 
     card.slotWorldPos.copy(card.slotPos).applyMatrix4(camera.matrixWorld)
@@ -690,7 +695,10 @@ function updateGroupTargets(): void {
 function stackSelection(): void {
   if (groupHeld.length < 2) return
 
-  const count = groupHeld.length
+  // Sum what each body stands for, not how many bodies there are. Two stacks of
+  // ten squared together are twenty cards, not two.
+  let count = 0
+  for (const c of groupHeld) count += c.count
   const keeper = groupHeld[0]
   for (let i = 1; i < groupHeld.length; i++) removeCard(groupHeld[i])
 
@@ -983,6 +991,8 @@ function updateReorder(): void {
 
 // --- Render loop ------------------------------------------------------------
 const clock = new THREE.Clock()
+const lastCamPos = new THREE.Vector3(Infinity, 0, 0)
+const lastCamQuat = new THREE.Quaternion(0, 0, 0, 0)
 const rp = new THREE.Vector3()
 const rq = new THREE.Quaternion()
 const qa = { x: 0, y: 0, z: 0, w: 1 }
@@ -1045,8 +1055,24 @@ function animate(): void {
 
   updateHover(nowMs)
 
-  // Only pay for shadows on frames where geometry actually moved.
-  renderer.shadowMap.needsUpdate = world.stats.awake > 0 || grabbed !== null || groupHeld.length > 0
+  // Only pay for shadows on frames where geometry actually moved — but that has
+  // to include the hand. Cards in the fan are Held, which deliberately keeps
+  // them out of the solver, so they never count as "awake"; the shadow map went
+  // stale and the fan's shadow sat frozen until something on the table happened
+  // to wake up. The fan moves whenever the camera orbits (it is defined in
+  // camera space) or whenever it is re-fanning after a card leaves.
+  const cameraMoved =
+    lastCamPos.distanceToSquared(camera.position) > 1e-12 || Math.abs(lastCamQuat.dot(camera.quaternion)) < 1 - 1e-12
+  lastCamPos.copy(camera.position)
+  lastCamQuat.copy(camera.quaternion)
+
+  renderer.shadowMap.needsUpdate =
+    world.stats.awake > 0 ||
+    grabbed !== null ||
+    groupHeld.length > 0 ||
+    handSettling ||
+    cameraMoved ||
+    cards.some((c) => c.flying)
 
   renderer.render(scene, camera)
 
