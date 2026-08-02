@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { Spring } from './spring'
 import { World, BodyMode, TUNING, qSlerp, type Body } from './physics'
 import { createCardMesh, setHighlight, Highlight, CARD_HALF, CARD_MASS, type HighlightValue } from './card'
-import { angularVelocityTo, insertionIndexAt, makeRandom, planPlayThrow } from './gameplay'
+import { angularVelocityTo, insertionIndexAt, makeRandom, planPlayThrow, spread } from './gameplay'
 import { showPrompt, movePrompt, hidePrompt, showMarquee, hideMarquee } from './ui'
 
 /**
@@ -28,6 +28,8 @@ const RAIL_TOP = TABLE_Y + 0.018
 const FLOOR_Y = TABLE_Y - 0.55
 
 const NUM_CARDS = 7
+/** A full deck, stacked face-down in the middle of the table. */
+const DECK_SIZE = 52
 
 // How long you must rest on a card before its action prompt appears...
 const PROMPT_DELAY_MS = 340
@@ -334,6 +336,30 @@ for (let i = 0; i < NUM_CARDS; i++) {
   card.inHand = true
   card.handIndex = i
   card.body.mode = BodyMode.Held
+}
+
+/**
+ * The deck. Spawned already stacked and already asleep.
+ *
+ * Placed at its exact resting transform rather than dropped: fifty-two bodies
+ * released together all accelerate before any contact impulse has built, and the
+ * stack folds into itself before it can catch. Starting it settled skips that
+ * entirely, and a sleeping body is infinite mass, so an untouched deck is
+ * genuinely rigid — which is what makes cards land on it rather than in it.
+ */
+const deckRandom = makeRandom(20260802)
+for (let i = 0; i < DECK_SIZE; i++) {
+  const card = spawnCard()
+  // Backs up, with a touch of yaw so it looks handled rather than machined.
+  _e.set(Math.PI / 2, spread(deckRandom) * 0.025, 0, 'YXZ')
+  _q.setFromEuler(_e)
+  card.body.setTransform(
+    spread(deckRandom) * 0.0004,
+    CARD_HALF.z + i * CARD_HALF.z * 2,
+    spread(deckRandom) * 0.0004,
+    _q,
+  )
+  card.body.sleep()
 }
 
 // --- Camera orbit -----------------------------------------------------------

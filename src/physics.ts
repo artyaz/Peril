@@ -188,33 +188,107 @@ export const TUNING = {
   /** Contact solver iterations. Thin stacks need a few passes to firm up. */
   velocityIterations: 8,
   /** Overlap-resolution passes, run on the pseudo-velocity channel. */
-  positionIterations: 3,
-  /** Fraction of the previous substep's impulse re-applied as the initial
-   *  guess. Slightly under 1 so a stale contact cannot pump energy. */
-  warmStartScale: 0.92,
+  positionIterations: 6,
+  /**
+   * Solve contacts lowest-first, alternating direction between iterations.
+   *
+   * Gauss-Seidel propagates support one contact per sweep, so in an unordered
+   * pass a tall stack needs about as many iterations as it has cards and
+   * otherwise settles compressed — a 52-card deck stands at a fifth of its
+   * height. Sweeping up from the table carries the support all the way in a
+   * single iteration, and reversing on alternate iterations keeps the result
+   * symmetric rather than biased towards the bottom.
+   *
+   * An earlier attempt pinned the lower body of each contact instead (shock
+   * propagation). It made things markedly worse: shifting positions every
+   * substep changed the contact set, which expired the warm-start impulses that
+   * were doing most of the work holding the stack up.
+   */
+  sortContacts: true,
+  /**
+   * Bottom-up passes that pin the supporting card and lift only what rests on
+   * it.
+   *
+   * Symmetric position correction cannot expand a compressed stack: an interior
+   * card is pushed up by the contact below and down by the contact above in
+   * equal measure, so the two cancel and only the topmost card can move. The
+   * overlap therefore never comes out, and a deck that briefly compresses stays
+   * compressed. Pinning the lower body breaks the symmetry so the expansion
+   * propagates all the way up in one sweep. Confined to the pseudo-velocity
+   * channel, so it removes overlap without touching momentum.
+   *
+   * Exactly one sweep. Each pass compounds the correction up the stack, and at
+   * three or more a 52-card deck detonates.
+   */
+  shockIterations: 1,
+  /**
+   * Fraction of the previous substep's impulse re-applied as the initial guess.
+   *
+   * Full strength. Warm starting is not an optimisation here, it is the entire
+   * mechanism holding a tall stack up: the impulse at the bottom of a 52-card
+   * deck has to carry the weight of everything above it, and no realistic
+   * iteration count rebuilds that from zero each substep. Re-applying even 92%
+   * bleeds support faster than the solver can replace it, and the deck sinks
+   * into itself. Safety comes from clamping the accumulated impulse to be
+   * non-negative and re-solving every substep, not from damping it.
+   */
+  warmStartScale: 1.0,
 
   /** Position bias, applied only through the pseudo channel so it adds no
    *  energy. Can therefore be far stiffer than a classic Baumgarte term. */
-  contactBias: 0.75,
-  /** Overlap tolerated before correction kicks in. Keeps resting contacts calm. */
-  contactSlop: 0.00004,
+  contactBias: 0.9,
+  /**
+   * Overlap tolerated before correction kicks in, as a fraction of the thinner
+   * body's half-thickness rather than an absolute distance.
+   *
+   * Every length in this solver has to scale with the cards, or the tuning
+   * silently inverts when they get thinner. At 0.3mm a fixed 40um slop is 13%
+   * of a card, and cards visibly sink into one another.
+   */
+  slopFraction: 0.02,
   /** Cap on de-penetration velocity so deep overlap doesn't explode. */
   maxCorrectionSpeed: 0.9,
 
-  /** Speculative detection shell: contacts appear this far before touching, so
-   *  a fast card is braked onto the surface instead of skipping past it.
+  /**
+   * Speculative detection shell: contacts appear this far before touching, so a
+   * fast card is braked onto the surface instead of skipping past it.
    *
-   *  Deliberately constant. Scaling the shell with closing speed seems smarter
-   *  but is actively harmful: the contact set then flickers as bodies slow down,
-   *  which expires their warm-start impulses, drops the stack for a step, and
-   *  produces a self-sustaining bounce cycle that never settles. A fixed shell
-   *  keeps the contact set stable, so resting impulses persist and stacks
-   *  actually fall asleep. Being generous costs only a few no-op contacts,
-   *  since a speculative contact never pushes — it only caps approach speed. */
-  specMargin: 0.012,
+   * `specMargin` is the floor, applied to every pair. `specSpeedMargin` adds the
+   * distance the pair will actually close before the next substep.
+   *
+   * Both halves are load-bearing, and an earlier version got each wrong in turn.
+   * A shell that scales purely with closing speed collapses to nothing at rest,
+   * so the contact set flickers, warm-start impulses expire, and stacks bounce
+   * forever. A large constant shell instead is worse still at card thicknesses:
+   * at 0.3mm every card in a deck falls inside the shell of forty others, and
+   * five thousand mostly spurious constraints stop Gauss-Seidel converging — a
+   * struck deck folded to a tenth of its height at 27ms a frame. And a small
+   * constant shell simply lets a dropped card tunnel straight through the deck,
+   * since at 2m/s a card crosses 8mm in one substep.
+   *
+   * A constant floor plus a speed term gives all three: resting pairs get a
+   * fixed, flicker-free shell; only the handful of genuinely fast pairs pay for
+   * a wide one; and nothing tunnels.
+   */
+  specMargin: 0.004,
+  specSpeedMargin: 1.3,
+  /** Fraction of the remaining gap a pair may close in one substep. */
+  specApproach: 0.5,
+  /**
+   * How near to parallel two cards must be before their overlap is treated as a
+   * face contact. cos(53deg): deliberately generous.
+   *
+   * A tight threshold looks safer and is not. A card landing even slightly
+   * off-centre on a deck tilts as it settles, drops out of the face-manifold
+   * path, and is resolved by raw corner penetration instead — which, wedged
+   * among 52 near-coincident bodies, happily squeezes it down between them. Any
+   * two overlapping plates at a plausible resting angle should separate through
+   * their faces.
+   */
+  faceManifoldCos: 0.6,
 
   /** Cards barely bounce; below this approach speed they don't bounce at all. */
-  restitution: 0.05,
+  restitution: 0.08,
   restitutionThreshold: 0.28,
 
   frictionCardTable: 0.62,
@@ -238,16 +312,46 @@ export const TUNING = {
   /** Sleep thresholds: below these for `sleepDelay` seconds and we freeze. */
   sleepLinear: 0.022,
   sleepAngular: 0.28,
+  /**
+   * Wake thresholds, deliberately well above the sleep ones.
+   *
+   * Without this hysteresis, waking is contagious: a card landing on a deck
+   * nudges the top card, which stirs enough to wake the one beneath, and the
+   * cascade unfreezes all 52 within a few substeps. They then all fall at once
+   * and the deck folds up, because no realistic iteration count can propagate
+   * support through a stack that tall from a cold start. A sleeping body acts as
+   * infinite mass, so leaving the bulk of the deck asleep is not merely cheaper,
+   * it is what makes it behave like a solid object.
+   */
+  wakeLinear: 0.16,
+  wakeAngular: 1.6,
+  /**
+   * Above this speed an impact disturbs a settled stack regardless.
+   *
+   * Set above `maxThrowSpeed` on purpose, so nothing a player can throw will
+   * shatter a settled deck from above — it lands on top instead, which is both
+   * what a real deck does and the only behaviour this solver can hold. A
+   * 52-card stack that is awake all at once cannot support itself: the impulse
+   * at the bottom has to carry fifty cards' weight, and no practical iteration
+   * count rebuilds that before gravity has already folded the stack. Leaving it
+   * asleep, and therefore infinitely rigid, is the mechanism that makes a deck a
+   * solid object. Lateral shoves and the player's own hand still disturb it.
+   */
+  wakeImpactSpeed: 6.5,
   sleepDelay: 0.32,
-  /** How close counts as "touching" when grouping bodies into sleep islands. */
-  islandTouchDistance: 0.0008,
-  /** Below this centre separation two cards count as coincident, and the
-   *  push-out direction has to be decided by a stable tie-break instead. */
-  coincidentEpsilon: 0.0002,
+  /** How close counts as "touching" when grouping bodies into sleep islands,
+   *  in multiples of half-thickness, with a floor for very thin cards. */
+  islandTouchFraction: 0.8,
+  islandTouchFloor: 0.0003,
+  /** Below this centre separation — as a fraction of half-thickness — two cards
+   *  count as coincident, and the push-out direction has to be decided by a
+   *  stable tie-break instead. */
+  coincidentFraction: 0.15,
   /** How much shallower an in-plane overlap must be before it is preferred over
-   *  the face normal. Breaks the exact ties that flat overlapping cards create,
-   *  while staying small enough to keep true edge contacts correct. */
-  faceAxisBias: 0.0003,
+   *  the face normal, as a fraction of half-thickness. Breaks the exact ties
+   *  that flat overlapping cards create, while staying small enough to keep
+   *  true edge contacts correct. */
+  faceBiasFraction: 0.3,
 
   /** Grab drive. `grabStrength` is the fraction of the velocity error removed
    *  per substep; `grabMaxSpeed` clamps how fast the hand can pull. */
@@ -409,6 +513,12 @@ class Contact {
   jt2 = 0
   /** Accumulated pseudo-impulse for the overlap-only pass. */
   pjn = 0
+  /** Accumulated pseudo-impulse for the bottom-up pass. */
+  sjn = 0
+  /** Overlap tolerated here, scaled to how thin these particular bodies are. */
+  slop = 0
+  /** World height of the contact point, for ordering the shock pass. */
+  py = 0
   /** Approach speed captured before solving, used for the bounce term. */
   vnInitial = 0
   /** Effective mass along the normal; identical for both passes, so cache it. */
@@ -476,6 +586,8 @@ export class World {
   private islandParent = new Int32Array(0)
   private islandQuiet = new Uint8Array(0)
   private islandTimer = new Float64Array(0)
+
+  private contactOrder: number[] = []
 
   private warmSlot = new Map<number, number>()
   private warmData = new Float64Array(4 * 512)
@@ -803,7 +915,7 @@ export class World {
     c.jt1 = 0
     c.jt2 = 0
     c.pjn = 0
-    return c
+      return c
   }
 
   /**
@@ -830,8 +942,9 @@ export class World {
     // A speculative contact that is both far from touching and already
     // separating can never do anything. Dropping it here keeps a settled table
     // from carrying hundreds of no-op constraints through every iteration.
+    const scale = this.pairScale(a, b)
     const gap = -depth
-    if (gap > this.tuning.islandTouchDistance) {
+    if (gap > this.islandTouch(scale)) {
       // Contact-point velocity on each body: v + w x r.
       vset(_tmpRa, point.x - a.p.x, point.y - a.p.y, point.z - a.p.z)
       const va = vcross(_tmp5, a.w, _tmpRa)
@@ -845,13 +958,17 @@ export class World {
         rvy -= b.v.y + vb.y
         rvz -= b.v.z + vb.z
       }
-      // Keep it only if the pair could actually close that gap this substep.
+      // Keep it if the pair could close that gap in the next couple of substeps.
+      // Requiring it to close within *this* one discards the contact on exactly
+      // the step before impact, and a card dropped on a deck sails through it.
       const closing = -(rvx * nx + rvy * ny + rvz * nz)
-      if (closing * this.tuning.fixedDt < gap) return
+      if (closing * this.tuning.fixedDt * 2.5 < gap) return
     }
 
     const c = this.nextContact()
     c.key = World.contactKey(a.id, b ? b.id : 0, corner, feature)
+    c.slop = this.tuning.slopFraction * scale
+    c.py = point.y
     c.a = a
     c.b = b
     vset(c.ra, point.x - a.p.x, point.y - a.p.y, point.z - a.p.z)
@@ -872,7 +989,7 @@ export class World {
     for (let i = 0; i < bodies.length; i++) {
       const a = bodies[i]
       if (a.mode === BodyMode.Held || a.asleep) continue
-      const margin = this.tuning.specMargin
+      const margin = this.specMarginFor(a, null)
       const friction = this.tuning.frictionCardTable
 
       for (let c = 0; c < 8; c++) {
@@ -911,7 +1028,7 @@ export class World {
         const b = bodies[j]
         if (b.mode === BodyMode.Held) continue
         if (a.asleep && b.asleep) continue
-        const margin = this.tuning.specMargin
+        const margin = this.specMarginFor(a, b)
 
         // Broadphase: world AABBs. A flat card's box is only ~2mm tall, so
         // cards stacked above one another reject immediately — a bounding
@@ -928,17 +1045,27 @@ export class World {
         }
 
         const before = this.contactCount
-        // A face manifold is symmetric and already complete, so testing the
-        // reverse direction would only duplicate it.
-        if (!this.cornersAgainstBox(a, b, margin)) this.cornersAgainstBox(b, a, margin)
+        // Both directions, always.
+        //
+        // For a face contact it is tempting to test one way only, since two
+        // aligned cards give the same four corners either way. They do not once
+        // the cards are offset: the contact patch is their overlapping
+        // rectangle, and its corners come from both cards. Testing one
+        // direction then yields a lopsided two-point manifold, and a card
+        // dropped even slightly off-centre onto a deck tips and works its way
+        // down between the cards instead of resting on top. The facing-corner
+        // filter already keeps this at four points per side, and corners
+        // outside the overlap are rejected by the box test anyway.
+        this.cornersAgainstBox(a, b, margin)
+        this.cornersAgainstBox(b, a, margin)
 
         // A real touch wakes a sleeping neighbour, so stacks respond to a card
         // landing on them. Requiring actual motion matters: a speculative
         // contact from a barely-twitching card would otherwise keep re-waking
         // the whole stack underneath it forever.
         if (this.contactCount > before) {
-          if (a.asleep && !b.asleep && this.isStirring(b)) a.wake()
-          else if (b.asleep && !a.asleep && this.isStirring(a)) b.wake()
+          if (a.asleep && !b.asleep && this.shouldWake(a, b)) a.wake()
+          else if (b.asleep && !a.asleep && this.shouldWake(b, a)) b.wake()
         }
       }
     }
@@ -946,10 +1073,52 @@ export class World {
     this.stats.contacts = this.contactCount
   }
 
-  /** Is this body moving enough that a neighbour should be woken for it? */
-  private isStirring(b: Body): boolean {
+  /** Detection shell for a pair: a fixed floor plus how far they will close. */
+  private specMarginFor(a: Body, b: Body | null): number {
     const T = this.tuning
-    return b.mode !== BodyMode.Dynamic || vlen(b.v) > T.sleepLinear || vlen(b.w) > T.sleepAngular
+    let rel = vlen(a.v)
+    if (b) rel += vlen(b.v)
+    return T.specMargin + rel * T.fixedDt * T.specSpeedMargin
+  }
+
+  /**
+   * Reference half-thickness for a pair, used to scale every tolerance. Keeping
+   * these relative is what lets the same tuning hold for 2mm and 0.3mm cards.
+   */
+  private pairScale(a: Body, b: Body | null): number {
+    return b ? Math.min(a.half.z, b.half.z) : a.half.z
+  }
+
+  private islandTouch(scale: number): number {
+    return Math.max(this.tuning.islandTouchFraction * scale, this.tuning.islandTouchFloor)
+  }
+
+  /**
+   * Should `mover` wake the sleeping `sleeper` it is touching?
+   *
+   * Weight bearing down from above deliberately does not. A card set down on a
+   * deck nudges the top card just enough to wake the one below it, and the
+   * cascade unfreezes all 52 within a few substeps; they then fall together and
+   * the deck folds up, because support cannot propagate through a stack that
+   * tall from a cold start at any realistic iteration count. Since a sleeping
+   * body is infinite mass, leaving the deck asleep is precisely what makes it
+   * behave like the solid object it is — the same reason a real deck does not
+   * care that you put a card on it.
+   *
+   * Impact, lateral shove, spin, or the player's own hand all still wake it.
+   */
+  private shouldWake(sleeper: Body, mover: Body): boolean {
+    const T = this.tuning
+    // The player grabbing or holding something is always deliberate.
+    if (mover.mode !== BodyMode.Dynamic) return true
+    if (vlen(mover.v) > T.wakeImpactSpeed) return true
+    if (mover.p.y > sleeper.p.y) {
+      // Bearing down from above: only a sideways push counts. Spin is excluded
+      // too — a card landing even slightly off-centre picks up plenty of it, and
+      // letting that through reopens the same cascade by another route.
+      return Math.hypot(mover.v.x, mover.v.z) > T.wakeLinear
+    }
+    return vlen(mover.v) > T.wakeLinear || vlen(mover.w) > T.wakeAngular
   }
 
   /**
@@ -968,9 +1137,12 @@ export class World {
    *    more than half a thickness the corner's sign flips and would eject it out
    *    the far face, welding the pair into one coplanar sheet.
    */
-  private cornersAgainstBox(a: Body, b: Body, margin: number): boolean {
+  private cornersAgainstBox(a: Body, b: Body, margin: number): void {
     const T = this.tuning
     const h = b.half
+    const scale = this.pairScale(a, b)
+    const coincidentEps = T.coincidentFraction * scale
+    const faceBias = T.faceBiasFraction * scale
 
     // Relative centre offset in b's frame: the stable "which side" reference.
     const dCentre = qRotInv(
@@ -987,7 +1159,7 @@ export class World {
     // Are they near-parallel? Needed before a single slab depth can stand in for
     // every corner.
     const aAxisZ = qRotInv(_tmpAxis, b.q, qRot(_tmpAxis2, a.q, UNIT_Z))
-    const parallel = Math.abs(aAxisZ.z) > 0.95
+    const parallel = Math.abs(aAxisZ.z) > this.tuning.faceManifoldCos
 
     const useSlab = faceOverlap && parallel
 
@@ -996,7 +1168,7 @@ export class World {
     // offset to read, so fall back to a stable tie-break on body id; anything
     // state-derived flips between substeps and welds the pair together.
     const faceSign =
-      Math.abs(dCentre.z) > T.coincidentEpsilon ? (dCentre.z > 0 ? 1 : -1) : a.id > b.id ? 1 : -1
+      Math.abs(dCentre.z) > coincidentEps ? (dCentre.z > 0 ? 1 : -1) : a.id > b.id ? 1 : -1
     const signX = dCentre.x >= 0 ? 1 : -1
     const signY = dCentre.y >= 0 ? 1 : -1
 
@@ -1043,7 +1215,7 @@ export class World {
       if (useSlab) {
         axis = 2
         depth = dz
-      } else if (dz <= dx + T.faceAxisBias && dz <= dy + T.faceAxisBias) {
+      } else if (dz <= dx + faceBias && dz <= dy + faceBias) {
         axis = 2
         depth = dz
       } else if (dx <= dy) {
@@ -1063,7 +1235,6 @@ export class World {
       )
       this.addContact(a, b, p, nWorld.x, nWorld.y, nWorld.z, depth, this.tuning.frictionCardCard, c, axis)
     }
-    return useSlab
   }
 
   // ---- contact solving ----------------------------------------------------
@@ -1081,6 +1252,15 @@ export class World {
       if (c.b) kn += this.angularTerm(c.b, c.rb, c.n)
       c.kn = kn
       c.vnInitial = this.relativeNormalVelocity(c, false)
+    }
+
+    // Contact order: lowest first. Built once and reused by every pass.
+    const order = this.contactOrder
+    order.length = n
+    for (let i = 0; i < n; i++) order[i] = i
+    if (T.sortContacts && n > 1) {
+      const cs = this.contacts
+      order.sort((x, y) => cs[x].py - cs[y].py)
     }
 
     // Warm start: re-apply last substep's solution for contacts that persisted.
@@ -1112,7 +1292,11 @@ export class World {
 
     // Pass 1: real velocity. Stops motion and applies friction and bounce.
     for (let it = 0; it < T.velocityIterations; it++) {
-      for (let i = 0; i < n; i++) this.solveContactVelocity(this.contacts[i], dt)
+      if (it & 1) {
+        for (let i = n - 1; i >= 0; i--) this.solveContactVelocity(this.contacts[order[i]], dt)
+      } else {
+        for (let i = 0; i < n; i++) this.solveContactVelocity(this.contacts[order[i]], dt)
+      }
     }
 
     // Pass 2: overlap only, through the pseudo-velocity channel. Because these
@@ -1120,11 +1304,77 @@ export class World {
     // without adding energy, so cards rest exactly on the surface instead of
     // hovering at a penetration equilibrium.
     for (let it = 0; it < T.positionIterations; it++) {
-      for (let i = 0; i < n; i++) this.solveContactPosition(this.contacts[i], dt)
+      if (it & 1) {
+        for (let i = n - 1; i >= 0; i--) this.solveContactPosition(this.contacts[order[i]], dt)
+      } else {
+        for (let i = 0; i < n; i++) this.solveContactPosition(this.contacts[order[i]], dt)
+      }
+    }
+
+    // Pass 3: bottom-up, pinning each support. See `shockIterations`.
+    for (let it = 0; it < T.shockIterations; it++) {
+      for (let i = 0; i < n; i++) this.solveContactShock(this.contacts[order[i]], dt)
     }
 
     // Store solutions for next substep's warm start.
     this.storeWarmStart()
+  }
+
+  /** One contact of the bottom-up pass: pin whichever body is underneath. */
+  private solveContactShock(c: Contact, dt: number): void {
+    const T = this.tuning
+    const pen = c.depth - c.slop
+    if (pen <= 0) return
+
+    // `n` points from b towards a, so a is the body pushed along +n.
+    let mover: Body
+    let sign: number
+    if (!c.b || c.n.y >= 0) {
+      mover = c.a
+      sign = 1
+    } else {
+      mover = c.b
+      sign = -1
+    }
+    if (mover.asleep || mover.mode === BodyMode.Held) return
+
+    const r = mover === c.a ? c.ra : c.rb
+    const nx = c.n.x * sign
+    const ny = c.n.y * sign
+    const nz = c.n.z * sign
+
+    const k = mover.invMass + this.angularTerm(mover, r, vset(_tmp4, nx, ny, nz))
+    if (k < 1e-12) return
+
+    // Relative to the support, not absolute.
+    //
+    // Reading only the mover's own pseudo-velocity looks equivalent and is not:
+    // every card then receives the same correction, the stack translates upward
+    // as a rigid column instead of expanding, and the resulting churn costs more
+    // than it fixes. Including the support's velocity while withholding the
+    // impulse from it is what makes the correction accumulate up the stack.
+    const support = mover === c.a ? c.b : c.a
+    const vp = vcross(_tmp1, mover.pw, r)
+    let rvx = mover.pv.x + vp.x
+    let rvy = mover.pv.y + vp.y
+    let rvz = mover.pv.z + vp.z
+    if (support) {
+      const rs = mover === c.a ? c.rb : c.ra
+      const vs = vcross(_tmp2, support.pw, rs)
+      rvx -= support.pv.x + vs.x
+      rvy -= support.pv.y + vs.y
+      rvz -= support.pv.z + vs.z
+    }
+    const vn = rvx * nx + rvy * ny + rvz * nz
+
+    const target = Math.min((T.contactBias * pen) / dt, T.maxCorrectionSpeed)
+    let j = (target - vn) / k
+    const acc = Math.max(0, c.sjn + j)
+    j = acc - c.sjn
+    c.sjn = acc
+    if (j === 0) return
+
+    this.applyImpulse(mover, r, vset(_tmp3, nx * j, ny * j, nz * j), true)
   }
 
   private storeWarmStart(): void {
@@ -1183,8 +1433,19 @@ export class World {
     // it only forbids closing the gap faster than `gap / dt`. That brakes the
     // body to arrive exactly on the surface instead of overshooting through it.
     const vn = this.relativeNormalVelocity(c, false)
-    let target = c.depth < 0 ? c.depth / dt : 0
-    if (c.vnInitial < -T.restitutionThreshold) target = Math.max(target, -c.restitution * c.vnInitial)
+    // Approach no faster than covering half the remaining gap this substep.
+    // Allowing the full gap means arriving with exactly enough speed to land on
+    // the surface, and any staleness in the measurement overshoots straight
+    // into penetration — which, inside a deck, means ending up between cards.
+    let target = c.depth < 0 ? (c.depth / dt) * T.specApproach : 0
+    // Bounce only off a contact that is genuinely touching. Applying it to a
+    // speculative one throws the body back from a distance it never reached: a
+    // card dropped on a deck was rebounding off thin air several millimetres
+    // up, falling out of the detection shell, and stair-stepping its way down
+    // through all 52 cards.
+    if (c.depth >= 0 && c.vnInitial < -T.restitutionThreshold) {
+      target = Math.max(target, -c.restitution * c.vnInitial)
+    }
 
     let jn = (target - vn) / c.kn
     // Clamp the *accumulated* impulse so a contact can only ever push.
@@ -1247,7 +1508,7 @@ export class World {
   private solveContactPosition(c: Contact, dt: number): void {
     const T = this.tuning
     if (c.kn < 1e-12) return
-    const pen = c.depth - T.contactSlop
+    const pen = c.depth - c.slop
     if (pen <= 0) return
 
     const target = Math.min((T.contactBias * pen) / dt, T.maxCorrectionSpeed)
@@ -1318,7 +1579,7 @@ export class World {
     // speculative shell.
     for (let i = 0; i < this.contactCount; i++) {
       const c = this.contacts[i]
-      if (!c.b || c.depth < -T.islandTouchDistance) continue
+      if (!c.b || c.depth < -this.islandTouch(this.pairScale(c.a, c.b))) continue
       const ra = this.findRoot(c.a.islandIndex)
       const rb = this.findRoot(c.b.islandIndex)
       if (ra !== rb) parent[ra] = rb

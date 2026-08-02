@@ -9,8 +9,11 @@ import * as THREE from 'three'
 // so mass, gravity and air drag all behave at true scale.
 export const CARD_W = 0.063
 export const CARD_H = 0.088
-export const CARD_D = 0.002
-export const CARD_MASS = 0.0025
+// A real playing card is about a third of a millimetre thick and weighs under
+// two grams. At the old 2mm a 52-card deck stood 104mm tall — taller than a card
+// is wide — so the deck read as a brick rather than a deck.
+export const CARD_D = 0.00035
+export const CARD_MASS = 0.0018
 
 const CORNER_R = 0.005
 
@@ -43,8 +46,9 @@ function buildCardGeometry(): THREE.BufferGeometry {
   const geo = new THREE.ExtrudeGeometry(roundedRect(CARD_W, CARD_H, CORNER_R), {
     depth: CARD_D,
     bevelEnabled: true,
-    bevelThickness: 0.0004,
-    bevelSize: 0.0004,
+    // Scaled to the card: a bevel larger than the card is thick inverts it.
+    bevelThickness: CARD_D * 0.2,
+    bevelSize: CARD_D * 0.2,
     bevelSegments: 2,
     curveSegments: 10,
   })
