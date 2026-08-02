@@ -46,14 +46,24 @@ import { Hub } from '../server/hub'
 const hub = new Hub()
 hub.start()
 
-const server = http.createServer((req, res) => {
-  if ((req.url ?? '').startsWith('/api/health')) {
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, runtime: 'vercel', ...hub.stats() }))
-    return
-  }
-  res.writeHead(426, { 'content-type': 'text/plain' })
-  res.end('Upgrade Required — connect over WebSocket.')
+// A plain GET (no Upgrade header) doubles as the deploy health check: opening
+// /api/ws in a browser should return this JSON. If you get the app's HTML
+// instead, the function is not deployed and the request fell through to the
+// SPA rewrite — which is exactly the failure that made "Create room" look dead.
+const server = http.createServer((_req, res) => {
+  res.writeHead(200, {
+    'content-type': 'application/json',
+    'cache-control': 'no-store',
+  })
+  res.end(
+    JSON.stringify({
+      ok: true,
+      service: 'peril-hub',
+      runtime: 'vercel',
+      hint: 'Connect over WebSocket to play.',
+      ...hub.stats(),
+    }),
+  )
 })
 
 const wss = new WebSocketServer({ server, perMessageDeflate: false })
