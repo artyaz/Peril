@@ -602,6 +602,81 @@ section('13. A tall stack that stays awake does not fuse')
   }
 }
 
+// ---------------------------------------------------------------------------
+section('14. Pulling a card out of the deck does not collapse it')
+// ---------------------------------------------------------------------------
+{
+  // The exact interaction that broke, reproduced as the game performs it: a deck
+  // with the same slight yaw and offset jitter it is dealt with, grabbed at a
+  // point on the card's surface rather than its centre, and dragged away.
+  //
+  // Two faults combined here. Waking treated any contact as a disturbance,
+  // including purely speculative ones — and since the detection shell widens
+  // with speed, one card being dragged carried a halo deeper than the whole deck
+  // and woke all 52 at once. And the grab was allowed 6 m/s, fast enough to
+  // plough through the stack rather than slide out of it. A fully awake deck
+  // cannot support itself, so it folded, and the contact explosion took the
+  // frame rate with it.
+  const THIN = 0.00035
+  const HALF = v3(0.0315, 0.044, THIN / 2)
+  const DECK_MASS = 0.0018
+  const IDEAL = 52 * THIN
+
+  for (const pullFrom of [51, 26, 8]) {
+    const w = makeWorld()
+    const deck: Body[] = []
+    for (let i = 0; i < 52; i++) {
+      const b = w.createCard(HALF, DECK_MASS)
+      // Same jitter the game deals with, so the cards are not perfectly aligned.
+      const yaw = Math.sin(i * 7.13) * 0.025
+      const q = mulQuat(axisAngle(0, 1, 0, yaw), axisAngle(1, 0, 0, Math.PI / 2))
+      b.setTransform(Math.sin(i * 3.7) * 0.0004, THIN / 2 + i * THIN, Math.cos(i * 5.1) * 0.0004, q)
+      b.sleep()
+      deck.push(b)
+    }
+    run(w, 0.5)
+
+    const card = deck[pullFrom]
+    const rest = deck.filter((b) => b !== card)
+    // Grab a point on the surface, off-centre, exactly as a click would.
+    w.beginGrab(card, v3(card.p.x + 0.02, card.p.y + THIN / 2, card.p.z + 0.03))
+
+    let peakAwake = 0
+    let peakContacts = 0
+    const y0 = card.p.y
+    for (let f = 0; f < 120; f++) {
+      const t = Math.min(f / 45, 1)
+      w.updateGrab(card, v3(0.02 + 0.18 * t, y0 + 0.02 + 0.12 * t, 0.03 - 0.14 * t))
+      w.advance(1 / 60)
+      peakAwake = Math.max(peakAwake, w.stats.awake)
+      peakContacts = Math.max(peakContacts, w.stats.contacts)
+    }
+
+    const ys = rest.map((b) => b.p.y).sort((a, b) => a - b)
+    const height = ys[ys.length - 1] - ys[0] + THIN
+    let worstOverlap = 0
+    for (let i = 0; i < rest.length; i++) {
+      for (let j = i + 1; j < rest.length; j++) {
+        const a = rest[i]
+        const b = rest[j]
+        if (Math.abs(a.p.x - b.p.x) > 0.06 || Math.abs(a.p.z - b.p.z) > 0.085) continue
+        const dy = Math.abs(a.p.y - b.p.y)
+        if (dy < THIN) worstOverlap = Math.max(worstOverlap, (THIN - dy) / THIN)
+      }
+    }
+
+    const where = pullFrom === 51 ? 'top' : pullFrom === 26 ? 'middle' : 'near the bottom'
+    console.log(
+      `     from the ${where}: deck ${(height * 1000).toFixed(2)}mm, ${peakAwake} awake, ${peakContacts} contacts`,
+    )
+    ok(height > IDEAL * 0.93, `pulling from the ${where} leaves the deck standing`, `${(height * 1000).toFixed(2)}mm of ${(IDEAL * 1000).toFixed(1)}`)
+    ok(worstOverlap < 0.4, `pulling from the ${where} does not fuse the deck`, `worst overlap ${(worstOverlap * 100).toFixed(0)}%`)
+    // The contact explosion and the frame-rate collapse were the same event, so
+    // bounding contacts is the honest way to assert the lag is gone.
+    ok(peakContacts < 900, `pulling from the ${where} does not explode contacts`, `${peakContacts}`)
+  }
+}
+
 console.log(
   `\n${failures === 0 ? '\x1b[32m' : '\x1b[31m'}${checks - failures}/${checks} checks passed\x1b[0m\n`,
 )

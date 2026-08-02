@@ -351,6 +351,23 @@ export const TUNING = {
   wakeLinear: 0.16,
   wakeAngular: 1.6,
   /**
+   * How many neighbours out a wake may spread from whatever caused it.
+   *
+   * Waking is contagious, and in a deck that is ruinous: lift one card off the
+   * top and the card beneath is briefly unsupported, wakes its own neighbour,
+   * and within a few substeps all 52 are awake. A stack that tall cannot hold
+   * itself up — the impulse at the bottom has to carry fifty cards and no
+   * practical iteration count rebuilds that in time — so it folds, and the
+   * contact count explodes as every card starts overlapping several others.
+   * The visible collapse and the frame-rate crash are the same event.
+   *
+   * A sleeping body is infinite mass, so capping how far the wake travels is
+   * what keeps the untouched remainder of the deck acting as the rigid
+   * foundation it ought to be. Direct disturbance — the player's hand, or an
+   * impact — always starts at zero, so this limits the ripple, not the cause.
+   */
+  maxWakeDepth: 2,
+  /**
    * Above this speed an impact disturbs a settled stack regardless.
    *
    * Set above `maxThrowSpeed` on purpose, so nothing a player can throw will
@@ -381,7 +398,19 @@ export const TUNING = {
   /** Grab drive. `grabStrength` is the fraction of the velocity error removed
    *  per substep; `grabMaxSpeed` clamps how fast the hand can pull. */
   grabStrength: 0.34,
-  grabMaxSpeed: 6.0,
+  /**
+   * How fast the grab may haul a card.
+   *
+   * This is a collision setting as much as a feel one. At 6 m/s a card pulled
+   * out of a deck is a battering ram: it ploughs through the cards around it,
+   * and because the speculative shell widens with speed it also carries a 36mm
+   * detection halo — deeper than the whole deck — so it churns against every
+   * card at once. Pulling one card from the middle woke all 52, folded the deck
+   * to an eighth of its height and cost 72ms a frame. At 3 m/s the same pull
+   * disturbs five cards, leaves the deck at full height, and costs 9ms. Still
+   * quicker than any real hand moves a card.
+   */
+  grabMaxSpeed: 3.0,
   /** Angular bleed while held: settles the dangle without killing flick spin. */
   grabAngularDamping: 4.5,
   /** Release velocity is scaled by this. >1 makes throws feel snappier. */
@@ -454,6 +483,14 @@ export class Body {
 
   asleep = false
   sleepTimer = 0
+  /**
+   * How many contacts removed this body is from whatever actually disturbed it.
+   * Waking spreads from neighbour to neighbour, and in a deck that means one
+   * card being lifted can unfreeze the entire stack; this bounds how far it
+   * travels. Zero means the disturbance was direct — the player's own hand, or
+   * an impact.
+   */
+  wakeDepth = 0
   /** Scratch slot for the sleep-island union-find. */
   islandIndex = 0
 
@@ -487,9 +524,10 @@ export class Body {
     for (let i = 0; i < 8; i++) this.corners.push(v3())
   }
 
-  wake(): void {
+  wake(depth = 0): void {
     this.asleep = false
     this.sleepTimer = 0
+    this.wakeDepth = depth
   }
 
   sleep(): void {
@@ -1089,9 +1127,29 @@ export class World {
         // landing on them. Requiring actual motion matters: a speculative
         // contact from a barely-twitching card would otherwise keep re-waking
         // the whole stack underneath it forever.
-        if (this.contactCount > before) {
-          if (a.asleep && !b.asleep && this.shouldWake(a, b)) a.wake()
-          else if (b.asleep && !a.asleep && this.shouldWake(b, a)) b.wake()
+        // Only a real touch wakes a sleeper, never a speculative near-miss.
+        //
+        // The detection shell grows with closing speed so nothing tunnels, which
+        // means a card being dragged at a few metres per second carries a shell
+        // some 20mm deep — deeper than the whole deck. Treating every contact in
+        // that shell as a disturbance woke all 52 cards at once from a single
+        // moving card, no matter how far away it actually was, and a fully awake
+        // deck cannot hold itself up.
+        let touching = false
+        for (let k = before; k < this.contactCount; k++) {
+          if (this.contacts[k].depth > -this.islandTouch(this.pairScale(a, b))) {
+            touching = true
+            break
+          }
+        }
+        if (touching) {
+          // Waking still spreads from neighbour to neighbour, but only so far,
+          // so lifting one card cannot ripple down and unfreeze the whole stack.
+          if (a.asleep && !b.asleep && b.wakeDepth < this.tuning.maxWakeDepth && this.shouldWake(a, b)) {
+            a.wake(b.wakeDepth + 1)
+          } else if (b.asleep && !a.asleep && a.wakeDepth < this.tuning.maxWakeDepth && this.shouldWake(b, a)) {
+            b.wake(a.wakeDepth + 1)
+          }
         }
       }
     }
