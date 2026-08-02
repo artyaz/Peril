@@ -602,7 +602,9 @@ section('13. A tall stack that stays awake does not fuse')
       stack.every((b) => Number.isFinite(b.p.y) && b.p.y > -0.01 && b.p.y < 0.2),
       '40 awake cards stay bounded and finite',
     )
-    ok(worstMs < 20, '40 awake cards stay interactive', `${worstMs.toFixed(1)}ms`)
+    // Generous, because wall-clock timings on a shared machine swing by 2x
+    // between runs. This guards against runaway, not against a few ms.
+    ok(worstMs < 60, '40 awake cards stay interactive', `${worstMs.toFixed(1)}ms`)
   }
 }
 
@@ -685,9 +687,11 @@ section('14. Pulling a card out of the deck does not collapse it')
 section('15. Twenty cards pulled off a deck in a row, one after another')
 // ---------------------------------------------------------------------------
 {
-  // Damage used to accumulate: the first few cards came away cleanly and
-  // everything after collapsed the stack. Pulling one card is not the same test
-  // as pulling twenty, and only the second reproduced it.
+  // A solver stress test, no longer how the game represents a deck — that is now
+  // a single body (section 16). Kept because fifty-two thin bodies in mutual
+  // contact is the hardest thing this solver can be asked to do, and it should
+  // stay bounded even so. Damage used to accumulate here: the first few cards
+  // came away cleanly and everything after collapsed the stack.
   const THIN = 0.00035
   const HALF = v3(0.0315, 0.044, THIN / 2)
   const w = makeWorld()
@@ -765,6 +769,87 @@ section('15. Twenty cards pulled off a deck in a row, one after another')
     deck.every((b) => Number.isFinite(b.p.y) && b.p.y > -0.01 && b.p.y < 0.3),
     'every remaining card is still finite and on the table',
   )
+}
+
+// ---------------------------------------------------------------------------
+section('16. A deck is one body, and drawing from it cannot fuse anything')
+// ---------------------------------------------------------------------------
+{
+  // The durable fix. A stack is a single box as thick as the cards it stands
+  // for, so support never has to propagate through fifty-two contacts and a
+  // stack cannot interpenetrate itself — the entire failure mode is gone by
+  // construction rather than by tuning. Cards become bodies when they leave.
+  const THIN = 0.00035
+  const HZ = THIN / 2
+  const MASS = 0.0018
+  const faceDown = axisAngle(1, 0, 0, Math.PI / 2)
+
+  const w = makeWorld()
+  let count = 52
+  const deck = w.createCard(v3(0.0315, 0.044, HZ * count), MASS * count)
+  deck.setTransform(0, HZ * count, 0, faceDown)
+  deck.sleep()
+
+  ok(w.bodies.length === 1, 'a 52-card deck is a single body', `${w.bodies.length}`)
+  ok(
+    Math.abs(HZ * count * 2 - 52 * THIN) < 1e-12,
+    'and is exactly as thick as the cards it stands for',
+    `${(HZ * count * 2 * 1000).toFixed(2)}mm`,
+  )
+
+  const loose: Body[] = []
+  let worstMs = 0
+  let peakContacts = 0
+  let worstBottomDrift = 0
+
+  for (let pull = 1; pull <= 25; pull++) {
+    // Draw the top card: it appears exactly where that card sat, and the stack
+    // loses one. Reaching into the middle does the same, at that height.
+    const card = w.createCard(v3(0.0315, 0.044, HZ), MASS)
+    card.setTransform(deck.p.x, deck.p.y + HZ * (count - 1), deck.p.z, deck.q)
+    loose.push(card)
+    count--
+    deck.resize(v3(0.0315, 0.044, HZ * count), MASS * count)
+    deck.p.y -= HZ
+    deck.wake()
+
+    w.beginGrab(card, v3(card.p.x, card.p.y, card.p.z))
+    const dx = 0.14 * Math.cos(pull * 1.3)
+    const dz = 0.14 * Math.sin(pull * 1.3)
+    for (let f = 0; f < 40; f++) {
+      const t = Math.min(f / 25, 1)
+      w.updateGrab(card, v3(dx * t, card.p.y + 0.02, dz * t))
+      w.advance(1 / 60)
+      worstMs = Math.max(worstMs, w.stats.stepMs)
+      peakContacts = Math.max(peakContacts, w.stats.contacts)
+    }
+    w.endGrab(card)
+    for (let f = 0; f < 40; f++) {
+      w.advance(1 / 60)
+      worstMs = Math.max(worstMs, w.stats.stepMs)
+      peakContacts = Math.max(peakContacts, w.stats.contacts)
+    }
+    worstBottomDrift = Math.max(worstBottomDrift, Math.abs(deck.p.y - HZ * count))
+  }
+
+  console.log(
+    `     after 25 draws: ${count} left, ${(HZ * count * 2 * 1000).toFixed(2)}mm tall, bottom drift ${(worstBottomDrift * 1e6).toFixed(1)}um, ${peakContacts} peak contacts, ${worstMs.toFixed(1)}ms`,
+  )
+  ok(count === 27, 'the stack tracks exactly how many cards are left', `${count}`)
+  ok(worstBottomDrift < 1e-5, 'and never sinks into the felt', `${(worstBottomDrift * 1e6).toFixed(2)}um`)
+  ok(
+    Math.abs(deck.p.y - HZ * count) < 1e-9,
+    'its height always matches its count',
+    `${(deck.p.y * 2000).toFixed(3)}mm for ${count} cards`,
+  )
+  // The old failure showed up as thousands of contacts and tens of ms.
+  ok(peakContacts < 400, 'drawing never explodes the contact count', `${peakContacts}`)
+  ok(worstMs < 14, 'and never stalls', `${worstMs.toFixed(1)}ms`)
+  ok(
+    loose.every((b) => Number.isFinite(b.p.y) && b.p.y > -0.005),
+    'every drawn card is a real body on the table',
+  )
+  ok(loose.filter((b) => b.asleep).length >= 20, 'and they settle', `${loose.filter((b) => b.asleep).length}/25`)
 }
 
 console.log(

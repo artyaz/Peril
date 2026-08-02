@@ -581,6 +581,26 @@ export class Body {
     for (let i = 0; i < 8; i++) this.corners.push(v3())
   }
 
+  /**
+   * Change this body's box size and mass in place.
+   *
+   * A stack of cards is one body whose thickness is the card count times the
+   * card thickness, so taking a card off it is a resize rather than a spawn.
+   * Inertia and the broadphase radius are derived quantities and have to follow.
+   */
+  resize(halfExtents: V3, mass: number): void {
+    vset(this.half, halfExtents.x, halfExtents.y, halfExtents.z)
+    this.boundRadius = vlen(this.half)
+    this.mass = mass
+    this.invMass = mass > 0 ? 1 / mass : 0
+    const { x: hx, y: hy, z: hz } = this.half
+    const c = mass / 3
+    const ix = c * (hy * hy + hz * hz)
+    const iy = c * (hx * hx + hz * hz)
+    const iz = c * (hx * hx + hy * hy)
+    vset(this.invInertia, ix > 0 ? 1 / ix : 0, iy > 0 ? 1 / iy : 0, iz > 0 ? 1 / iz : 0)
+  }
+
   wake(depth = 0): void {
     this.asleep = false
     this.sleepTimer = 0

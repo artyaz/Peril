@@ -132,6 +132,19 @@ const world = new World({
 interface Card {
   body: Body
   mesh: THREE.Mesh
+  /**
+   * How many cards this body represents.
+   *
+   * A stack is not a pile of bodies, it is one body as thick as the cards it
+   * stands for. Fifty-two separate 0.35mm slabs in mutual contact is the case no
+   * impulse solver holds reliably — support has to propagate through every one
+   * of them each step, and the moment it cannot the stack folds into itself. One
+   * box cannot interpenetrate itself, so the whole class of failure disappears.
+   * Cards become independent bodies only when they leave a stack.
+   */
+  count: number
+  /** Local scale, thickening the shared card mesh to match `count`. */
+  scale: THREE.Vector3
   /** Whether this card belongs to the fan in front of the camera. */
   inHand: boolean
   /** Position within the fan. The fan is drawn in this order, so reordering is
@@ -154,13 +167,15 @@ interface Card {
 
 const cards: Card[] = []
 
-function spawnCard(): Card {
-  const body = world.createCard(CARD_HALF, CARD_MASS)
+function spawnCard(count = 1): Card {
+  const body = world.createCard({ x: CARD_HALF.x, y: CARD_HALF.y, z: CARD_HALF.z * count }, CARD_MASS * count)
   const mesh = createCardMesh()
   scene.add(mesh)
   const card: Card = {
     body,
     mesh,
+    count,
+    scale: new THREE.Vector3(1, 1, count),
     inHand: false,
     handIndex: cards.length,
     flying: false,
@@ -177,6 +192,69 @@ function spawnCard(): Card {
   ;(mesh.userData as { card: Card }).card = card
   cards.push(card)
   return card
+}
+
+/** Resize a stack in place, holding its bottom face still so it shrinks downward. */
+function setCount(card: Card, count: number): void {
+  const before = card.count
+  card.count = count
+  card.body.resize({ x: CARD_HALF.x, y: CARD_HALF.y, z: CARD_HALF.z * count }, CARD_MASS * count)
+  card.scale.set(1, 1, count)
+
+  // The box grows about its centre, so drop it by the same amount to leave the
+  // bottom of the stack exactly where it was. Along world up, not the card's own
+  // normal: a face-down deck's normal points *downward*, so following it would
+  // float the deck off the felt as it shrank.
+  card.body.p.y += (count - before) * CARD_HALF.z
+}
+
+function removeCard(card: Card): void {
+  world.remove(card.body)
+  scene.remove(card.mesh)
+  const i = cards.indexOf(card)
+  if (i >= 0) cards.splice(i, 1)
+}
+
+/** Where the cursor meets the felt, clamped inside the rail. */
+function cursorOnTable(out: THREE.Vector3): THREE.Vector3 {
+  raycaster.setFromCamera(pointer, camera)
+  const dir = raycaster.ray.direction
+  const t = Math.abs(dir.y) > 1e-5 ? (TABLE_Y - camera.position.y) / dir.y : 1
+  out.copy(camera.position).addScaledVector(dir, Math.max(t, 0.05))
+  const r = Math.hypot(out.x, out.z)
+  const limit = RAIL_RADIUS - CARD_HALF.y
+  if (r > limit) {
+    out.x *= limit / r
+    out.z *= limit / r
+  }
+  out.y = TABLE_Y
+  return out
+}
+
+/**
+ * Take the top card off a stack: spawn it as its own body exactly where that
+ * card sits, and shorten the stack by one.
+ *
+ * Pulling from the middle or the bottom does the same thing. Physically
+ * extracting a card from inside a solid block is not something this can model,
+ * and a player only ever wants the card — so it appears at the height they
+ * reached for, and the stack simply loses one.
+ */
+function drawFromStack(stack: Card): Card {
+  const loose = spawnCard(1)
+  // The topmost card sits half the stack's thickness up, less its own half.
+  // Measured in world up so it is the visible top of the pile whichever way the
+  // stack is facing.
+  loose.body.setTransform(
+    stack.body.p.x,
+    stack.body.p.y + CARD_HALF.z * (stack.count - 1),
+    stack.body.p.z,
+    stack.body.q,
+  )
+  setCount(stack, stack.count - 1)
+  if (stack.count <= 0) removeCard(stack)
+  else stack.body.wake()
+  return loose
 }
 
 function applyHighlight(card: Card, level: HighlightValue): void {
@@ -352,20 +430,11 @@ for (let i = 0; i < NUM_CARDS; i++) {
  * entirely, and a sleeping body is infinite mass, so an untouched deck is
  * genuinely rigid — which is what makes cards land on it rather than in it.
  */
-const deckRandom = makeRandom(20260802)
-for (let i = 0; i < DECK_SIZE; i++) {
-  const card = spawnCard()
-  // Backs up, with a touch of yaw so it looks handled rather than machined.
-  _e.set(Math.PI / 2, spread(deckRandom) * 0.025, 0, 'YXZ')
-  _q.setFromEuler(_e)
-  card.body.setTransform(
-    spread(deckRandom) * 0.0004,
-    CARD_HALF.z + i * CARD_HALF.z * 2,
-    spread(deckRandom) * 0.0004,
-    _q,
-  )
-  card.body.sleep()
-}
+const deck = spawnCard(DECK_SIZE)
+_e.set(Math.PI / 2, 0, 0, 'YXZ')
+_q.setFromEuler(_e)
+deck.body.setTransform(0, TABLE_Y + CARD_HALF.z * DECK_SIZE, 0, _q)
+deck.body.sleep()
 
 // --- Camera orbit -----------------------------------------------------------
 const camYaw = new Spring(0, 100, 14)
@@ -473,8 +542,10 @@ function playOnto(target: Card): void {
 }
 
 /** Take a card off the table; it flies into the fan under a grab constraint. */
-function takeCard(card: Card): void {
-  if (card.inHand || card.flying) return
+function takeCard(target: Card): void {
+  if (target.inHand || target.flying) return
+  // Reaching into a stack draws a single card out of it.
+  const card = target.count > 1 ? drawFromStack(target) : target
   card.flying = true
   card.flyingFor = 0
   card.flyFrom.set(card.body.p.x, card.body.p.y, card.body.p.z)
@@ -574,6 +645,45 @@ function updateGroupTargets(): void {
       z: grabTarget.z + right.z * ox + up.z * oy,
     })
   }
+}
+
+/**
+ * Square the cards you are holding into a single stack under the cursor.
+ *
+ * The stack keeps the cursor's grip, so it can be carried on and set down
+ * wherever you like. Squaring up a handful is an arranging action, like the fan
+ * in your hand — one of the few places where deciding a card's exact position is
+ * the correct thing to do rather than a cheat.
+ */
+function stackSelection(): void {
+  if (groupHeld.length < 2) return
+
+  const count = groupHeld.length
+  const keeper = groupHeld[0]
+  for (let i = 1; i < groupHeld.length; i++) removeCard(groupHeld[i])
+
+  setCount(keeper, count)
+  cursorOnTable(_v2)
+  _e.set(Math.PI / 2, 0, 0, 'YXZ')
+  _q.setFromEuler(_e)
+  keeper.body.setTransform(_v2.x, TABLE_Y + CARD_HALF.z * count, _v2.z, _q)
+  keeper.body.v.x = 0
+  keeper.body.v.y = 0
+  keeper.body.v.z = 0
+  keeper.body.w.x = 0
+  keeper.body.w.y = 0
+  keeper.body.w.z = 0
+
+  // Stay in hand: one body now, still on the end of the cursor.
+  groupHeld = [keeper]
+  camera.getWorldDirection(forward)
+  groupDepth = THREE.MathUtils.clamp(
+    _v.set(keeper.body.p.x, keeper.body.p.y, keeper.body.p.z).sub(camera.position).dot(forward),
+    0.22,
+    1.2,
+  )
+  world.beginGrab(keeper.body, keeper.body.p)
+  quickUntil = performance.now() + PROMPT_QUICK_MS
 }
 
 function releaseGroup(): void {
@@ -735,6 +845,10 @@ window.addEventListener('keydown', (e) => {
     takeCard(hoverCard)
     return
   }
+  if (k === 's' && groupHeld.length > 1) {
+    stackSelection()
+    return
+  }
   if (k === 'h') {
     hudOn = !hudOn
     hud.style.display = hudOn ? 'block' : 'none'
@@ -810,7 +924,11 @@ function updateHover(nowMs: number): void {
     applyHighlight(hoverCard, action === 'X' ? Highlight.Target : Highlight.Pick)
     showPrompt(
       action,
-      action === 'X' ? 'play onto this card' : 'take this card',
+      action === 'X'
+        ? 'play onto this card'
+        : hoverCard.count > 1
+          ? `take a card (${hoverCard.count} left)`
+          : 'take this card',
       clientPos.x,
       clientPos.y,
     )
@@ -834,7 +952,6 @@ function updateReorder(): void {
 const clock = new THREE.Clock()
 const rp = new THREE.Vector3()
 const rq = new THREE.Quaternion()
-const one = new THREE.Vector3(1, 1, 1)
 const qa = { x: 0, y: 0, z: 0, w: 1 }
 
 function animate(): void {
@@ -884,7 +1001,7 @@ function animate(): void {
       qSlerp(qa, b.prevQ, b.q, alpha)
       rq.set(qa.x, qa.y, qa.z, qa.w)
     }
-    card.mesh.matrix.compose(rp, rq, one)
+    card.mesh.matrix.compose(rp, rq, card.scale)
     // Cards are direct children of the scene, so the world matrix is the local
     // one. Writing it here rather than leaving it to the renderer means the
     // hover raycast below tests against this frame's positions instead of the
