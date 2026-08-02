@@ -86,9 +86,15 @@ input.code { text-transform: uppercase; letter-spacing: 0.26em; font-weight: 700
 .btn.ghost { background: transparent; }
 
 .hint { font-size: 12.5px; color: var(--ink-dim); margin-top: 14px; line-height: 1.5; }
+/* Neutral while connecting; red only once the attempt has actually failed. */
 .err {
   margin-top: 14px; padding: 10px 13px; border-radius: 10px; font-size: 13.5px;
-  background: rgba(255,107,107,0.13); border: 1px solid rgba(255,107,107,0.3);
+  line-height: 1.5;
+  background: rgba(255,255,255,0.06); border: 1px solid var(--panel-line);
+  color: var(--ink-dim);
+}
+.err.fatal {
+  background: rgba(255,107,107,0.13); border-color: rgba(255,107,107,0.3);
   color: #ffb3b3;
 }
 .recent { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
@@ -235,6 +241,9 @@ export class Overlay {
   private toastEl!: HTMLDivElement
   private netEl!: HTMLDivElement
   private errEl!: HTMLDivElement
+  private joinBtn!: HTMLButtonElement
+  private createBtn!: HTMLButtonElement
+  private busy = false
 
   /** Current view — read by callers deciding whether to route input to the UI. */
   view: 'home' | 'lobby' | 'game' = 'home'
@@ -298,6 +307,9 @@ export class Overlay {
     codeInput.value = opts.code
 
     const submit = (create: boolean) => {
+      // Guard against a second click while a connection is already in flight.
+      // Each extra click used to start another independent socket + retry loop.
+      if (this.busy) return
       const name = nameInput.value.trim() || 'Player'
       const code = codeInput.value.trim().toUpperCase()
       if (!create && !code) {
@@ -306,11 +318,14 @@ export class Overlay {
         return
       }
       this.clearError()
+      this.setConnecting(true)
       this.onHomeSubmit?.({ name, code, create })
     }
 
-    panel.querySelector('#join')!.addEventListener('click', () => submit(false))
-    panel.querySelector('#create')!.addEventListener('click', () => submit(true))
+    this.joinBtn = panel.querySelector<HTMLButtonElement>('#join')!
+    this.createBtn = panel.querySelector<HTMLButtonElement>('#create')!
+    this.joinBtn.addEventListener('click', () => submit(false))
+    this.createBtn.addEventListener('click', () => submit(true))
     codeInput.addEventListener('keydown', (e) => {
       if ((e as KeyboardEvent).key === 'Enter') submit(false)
     })
@@ -402,9 +417,33 @@ export class Overlay {
     this.netEl.classList.toggle('hidden', view === 'home')
   }
 
+  /**
+   * Reflect an in-flight connection on the home screen.
+   *
+   * Without this the join/create buttons fired into a promise and the UI never
+   * changed, so a server that could not be reached looked exactly like a dead
+   * button. Silence is the worst possible failure mode.
+   */
+  setConnecting(on: boolean) {
+    this.busy = on
+    this.joinBtn.disabled = on
+    this.createBtn.disabled = on
+    this.joinBtn.textContent = on ? 'Connecting…' : 'Join room'
+    this.createBtn.textContent = on ? '…' : 'Create new'
+  }
+
+  /** Progress note while connecting — keeps the buttons disabled. */
+  showConnectingHint(message: string) {
+    this.errEl.textContent = message
+    this.errEl.classList.remove('hidden', 'fatal')
+  }
+
   showError(message: string) {
     this.errEl.textContent = message
     this.errEl.classList.remove('hidden')
+    this.errEl.classList.add('fatal')
+    // An error means the attempt is over — give the buttons back.
+    this.setConnecting(false)
   }
 
   clearError() {

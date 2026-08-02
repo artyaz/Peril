@@ -63,7 +63,13 @@ export class NetClient {
   private opts: NetOptions | null = null
   private closedByUs = false
 
-  private reconnectAttempt = 0
+  /** Consecutive failed attempts. Public so the UI can surface a real message
+   *  instead of leaving the player staring at a button that "does nothing". */
+  attempts = 0
+  /** True once any connection has ever succeeded. Distinguishes "server isn't
+   *  there" (give up, tell the user) from "connection dropped" (retry forever). */
+  everConnected = false
+
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private presenceTimer: ReturnType<typeof setInterval> | null = null
@@ -83,15 +89,51 @@ export class NetClient {
   // -------------------------------------------------------------------------
 
   connect(opts: NetOptions) {
+    // Tear down anything already in flight FIRST.
+    //
+    // Without this, clicking "Create room" twice left the original socket and
+    // its pending retry timer alive and started a second, independent
+    // reconnect loop beside them. Each further click doubled the loops again,
+    // which is how a dead endpoint produced hundreds of failed handshakes in
+    // the console instead of the handful the backoff is designed to allow.
+    this.teardown()
+
     this.opts = opts
     this.closedByUs = false
-    this.reconnectAttempt = 0
+    this.attempts = 0
     this.open()
+  }
+
+  /** Detach and close the current socket without triggering a reconnect. */
+  private teardown() {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = null
+    this.stopTimers()
+
+    const old = this.ws
+    this.ws = null
+    if (old) {
+      // Null the handlers before closing, or the stale `onclose` fires and
+      // schedules yet another reconnect for a socket we deliberately dropped.
+      old.onopen = null
+      old.onmessage = null
+      old.onclose = null
+      old.onerror = null
+      try {
+        old.close()
+      } catch {
+        /* already dead */
+      }
+    }
+
+    this.interp.reset()
+    this.clockReady = false
+    this.samples.length = 0
   }
 
   private open() {
     if (!this.opts) return
-    this.setStatus(this.reconnectAttempt > 0 ? 'reconnecting' : 'connecting')
+    this.setStatus(this.attempts > 0 ? 'reconnecting' : 'connecting')
 
     let ws: WebSocket
     try {
@@ -104,7 +146,8 @@ export class NetClient {
     this.ws = ws
 
     ws.onopen = () => {
-      this.reconnectAttempt = 0
+      this.attempts = 0
+      this.everConnected = true
       this.setStatus('open')
       const o = this.opts!
       this.sendControl({
@@ -143,20 +186,33 @@ export class NetClient {
 
   disconnect() {
     this.closedByUs = true
-    this.stopTimers()
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
-    this.reconnectTimer = null
-    try {
-      this.ws?.close()
-    } catch {
-      /* ignore */
-    }
-    this.ws = null
+    this.teardown()
     this.setStatus('idle')
   }
 
+  /** Attempts before we conclude the endpoint simply is not there. */
+  private static readonly GIVE_UP_AFTER = 6
+
   private scheduleReconnect() {
     if (this.closedByUs) return
+
+    this.attempts++
+
+    // Never connected + repeated failures means the endpoint is wrong or the
+    // server is not deployed — retrying forever just spams the console and
+    // hides the problem. A drop AFTER a successful session is different: that
+    // is a transient network event (or a Vercel function hitting its max
+    // duration), so keep retrying indefinitely.
+    if (!this.everConnected && this.attempts >= NetClient.GIVE_UP_AFTER) {
+      this.setStatus('fatal')
+      this.onError?.(
+        `Can't reach the game server at ${wsUrl()} — ${this.attempts} attempts failed. ` +
+          'The WebSocket endpoint is not responding.',
+        true,
+      )
+      return
+    }
+
     this.setStatus('reconnecting')
     // The buffer's timestamps refer to the old session's clock — keeping them
     // would make the first frames after reconnect jump.
@@ -164,13 +220,9 @@ export class NetClient {
     this.clockReady = false
     this.samples.length = 0
 
-    const delay = Math.min(
-      RECONNECT_MAX_MS,
-      RECONNECT_BASE_MS * 2 ** this.reconnectAttempt,
-    )
+    const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** (this.attempts - 1))
     // Jitter so a server restart does not bring every client back in lockstep.
     const jittered = delay * (0.75 + Math.random() * 0.5)
-    this.reconnectAttempt++
     this.reconnectTimer = setTimeout(() => this.open(), jittered)
   }
 
@@ -383,9 +435,21 @@ function copyPresence(from: Presence, to: Presence) {
   to.dragRotY = from.dragRotY
 }
 
+/**
+ * WebSocket endpoint.
+ *
+ * Defaults to `/api/ws`, which is the one path that works everywhere: it is
+ * the file-routed name of `api/ws.ts` on Vercel, and both the dev plugin and
+ * the standalone server accept it as well as the bare `/ws`. One path, no
+ * per-environment branching.
+ *
+ * Set `VITE_PERIL_WS` to point at a hub hosted somewhere else — e.g. keeping
+ * the client on Vercel while the authoritative server runs on a long-lived
+ * process:  VITE_PERIL_WS=wss://peril-hub.fly.dev/ws
+ */
 export function wsUrl(): string {
   const override = import.meta.env?.VITE_PERIL_WS as string | undefined
   if (override) return override
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${proto}//${location.host}/ws`
+  return `${proto}//${location.host}/api/ws`
 }

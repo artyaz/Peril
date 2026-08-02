@@ -4,10 +4,12 @@
  *   npm run build && npm start
  *
  * Deliberately dependency-light (node:http + ws). Any host that gives you a
- * long-lived Node process works — Railway, Fly, Render, a VPS. Note that
- * classic serverless functions do NOT, because WebSockets need a process that
- * outlives the request; the previous HTTP-polling design existed to work around
- * that and paid for it with ~800 ms of latency on every action.
+ * long-lived Node process works — Railway, Fly, Render, a VPS. This is the
+ * preferred deployment: rooms stay in memory behind a single writer, with no
+ * store sitting in the middle of the 20 Hz presence path.
+ *
+ * Vercel is also viable now that Functions serve WebSockets — see `api/ws.ts`
+ * for that entry point and the instance-affinity caveat that comes with it.
  */
 
 import { createReadStream, existsSync, statSync } from 'node:fs'
@@ -18,7 +20,8 @@ import { Hub } from './hub'
 
 const PORT = Number(process.env.PORT ?? 8080)
 const DIST = resolve(process.cwd(), 'dist')
-const WS_PATH = '/ws'
+/** `/api/ws` mirrors Vercel's file route so the client uses one URL everywhere. */
+const WS_PATHS = new Set(['/ws', '/api/ws'])
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -77,7 +80,7 @@ const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false })
 
 server.on('upgrade', (req, socket, head) => {
   const path = (req.url ?? '').split('?')[0]
-  if (path !== WS_PATH) {
+  if (!WS_PATHS.has(path)) {
     socket.destroy()
     return
   }
@@ -85,7 +88,7 @@ server.on('upgrade', (req, socket, head) => {
 })
 
 server.listen(PORT, () => {
-  console.log(`Peril server  →  http://localhost:${PORT}   (ws ${WS_PATH})`)
+  console.log(`Peril server  →  http://localhost:${PORT}   (ws /api/ws)`)
 })
 
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "vite build",
+  "outputDirectory": "dist",
+  "functions": {
+    "api/ws.ts": {
+      "maxDuration": 300
+    }
+  },
+  "rewrites": [
+    { "source": "/((?!api/|assets/|models/).*)", "destination": "/index.html" }
+  ]
+}

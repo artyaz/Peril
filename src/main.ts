@@ -79,6 +79,8 @@ overlay.onHomeSubmit = async ({ name, code, create }) => {
 net.onSnapshot = (state) => {
   if (!joined) {
     joined = true
+    overlay.setConnecting(false)
+    overlay.clearError()
     setUrlRoom(state.code)
     rememberRoom(state.code, state.name)
   }
@@ -143,6 +145,14 @@ setInterval(() => {
   const s = net.snapshot
   if (s && joined) overlay.render(s, net.serverNow())
   overlay.setNet(net.status, Math.round(net.rtt), net.diagnostics.starved)
+
+  // Report progress while the first connection is still being attempted, so a
+  // slow or unreachable server reads as "trying" rather than "broken button".
+  if (!joined && net.status === 'reconnecting' && net.attempts >= 2) {
+    overlay.showConnectingHint(
+      `Still trying to reach the server… (attempt ${net.attempts})`,
+    )
+  }
 }, 250)
 
 // Expose a handle for debugging in the console.

@@ -518,6 +518,100 @@ async function main() {
     for (const c of extras) c.close()
   }
 
+  // ---- Endpoint paths -----------------------------------------------------
+  section('Endpoint paths')
+  {
+    // The client uses a single URL everywhere; `/api/ws` is what Vercel's file
+    // routing produces for api/ws.ts, and dev/standalone must accept it too.
+    for (const path of ['/ws', '/api/ws']) {
+      const probe = new TestClient(`p-path-${path}`, 'Path', `ws://127.0.0.1:${port}${path}`)
+      let ok = true
+      await probe.connect('PATHS', true).catch(() => (ok = false))
+      check(`accepts an upgrade on ${path}`, ok)
+      probe.close()
+    }
+  }
+
+  // ---- Connection resilience (regressions) --------------------------------
+  section('Connection resilience')
+  {
+    // Find a port with nothing on it, so connects are refused immediately.
+    const probe = createServer()
+    await new Promise<void>((r) => probe.listen(0, r))
+    const deadPort = (probe.address() as { port: number }).port
+    await new Promise<void>((r) => probe.close(() => r()))
+
+    // NetClient reaches for browser globals; supply the two it needs.
+    const g = globalThis as unknown as Record<string, unknown>
+    g.location = { protocol: 'http:', host: `127.0.0.1:${deadPort}` }
+
+    // Spy on socket construction. Counting *concurrently live* sockets is what
+    // actually distinguishes the bug: the give-up logic terminates either way,
+    // so a test that only asserts the end state passes even when connect()
+    // leaks parallel loops. Peak concurrency does not.
+    const RealWS = globalThis.WebSocket
+    let live = 0
+    let peakLive = 0
+    let constructed = 0
+    class SpyWebSocket extends RealWS {
+      constructor(url: string | URL, protocols?: string | string[]) {
+        super(url, protocols)
+        constructed++
+        live++
+        peakLive = Math.max(peakLive, live)
+        this.addEventListener('close', () => {
+          live--
+        })
+        // Connection-refused emits 'error' before 'close'; swallow it so node
+        // does not treat it as unhandled.
+        this.addEventListener('error', () => {})
+      }
+    }
+    g.WebSocket = SpyWebSocket
+
+    const { NetClient } = await import('../src/net/client')
+
+    const client = new NetClient()
+    let fatalCount = 0
+    client.onError = (_m, fatal) => {
+      if (fatal) fatalCount++
+    }
+
+    // Mash the button. Before the fix each call left the previous socket and
+    // its pending retry timer running, so three clicks meant three independent
+    // reconnect loops racing each other.
+    const opts = {
+      playerId: 'p-resilience',
+      name: 'Resilience',
+      roomCode: 'DEAD1',
+      create: true,
+    }
+    client.connect(opts)
+    client.connect(opts)
+    client.connect(opts)
+
+    const gaveUp = await until(() => fatalCount > 0, 30_000, 'give-up')
+    check('an unreachable server eventually reports a fatal error', gaveUp)
+    check(
+      'repeated connect() calls never leave sockets open in parallel',
+      peakLive === 1,
+      `peak concurrent sockets was ${peakLive}`,
+    )
+    // 3 explicit connect() calls + (GIVE_UP_AFTER − 1) retries on the surviving
+    // loop. Anything more means a leaked loop is still constructing sockets.
+    check(
+      'total sockets stay bounded',
+      constructed <= 8,
+      `${constructed} sockets constructed`,
+    )
+    check('gives up exactly once', fatalCount === 1, `saw ${fatalCount}`)
+    check('status is terminal after giving up', client.status === 'fatal')
+
+    client.disconnect()
+    g.WebSocket = RealWS
+    delete g.location
+  }
+
   // ---- Teardown -----------------------------------------------------------
   alice.close()
   cara.close()

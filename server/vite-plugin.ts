@@ -13,7 +13,9 @@ import type { Plugin } from 'vite'
 import { WebSocketServer } from 'ws'
 import { Hub } from './hub'
 
-export const WS_PATH = '/ws'
+/** Both are accepted so the client can use one URL in every environment:
+ *  `/api/ws` is what Vercel file-routing produces for `api/ws.ts`. */
+export const WS_PATHS = ['/ws', '/api/ws']
 
 export function perilServer(): Plugin {
   return {
@@ -27,10 +29,10 @@ export function perilServer(): Plugin {
       server.httpServer?.on(
         'upgrade',
         (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-          // Vite's HMR socket shares this server — only claim our own path and
+          // Vite's HMR socket shares this server — only claim our own paths and
           // let every other upgrade fall through to Vite's handler.
           const path = (req.url ?? '').split('?')[0]
-          if (path !== WS_PATH) return
+          if (!WS_PATHS.includes(path)) return
           wss.handleUpgrade(req, socket, head, (ws) => hub.handleConnection(ws))
         },
       )
@@ -41,7 +43,9 @@ export function perilServer(): Plugin {
       })
 
       server.httpServer?.once('listening', () => {
-        server.config.logger.info(`  ➜  Peril hub:  ws://localhost:${resolvePort(server)}${WS_PATH}`)
+        server.config.logger.info(
+          `  ➜  Peril hub:  ws://localhost:${resolvePort(server)}${WS_PATHS[1]}`,
+        )
       })
     },
   }

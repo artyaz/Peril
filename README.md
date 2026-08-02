@@ -177,11 +177,51 @@ so the snap-back is elastic rather than a teleport.
 
 ### Deploying
 
-`npm run build && npm start` on any host that gives you a **long-lived Node
-process** — Railway, Fly, Render, a VPS. Classic serverless functions will not
-work: WebSockets need a process that outlives the request. (The previous
-HTTP-polling design existed to work around exactly that and paid ~800 ms of
-latency per action for it.)
+The client talks to **`/api/ws`** in every environment. The dev plugin, the
+standalone server and Vercel's file routing all answer on that path, so there
+is no per-environment branching. Override it with `VITE_PERIL_WS` when the hub
+lives somewhere other than the site.
+
+#### Option A — one long-lived process (recommended)
+
+```bash
+npm run build && npm start
+```
+
+Fly, Railway, Render, a VPS. The hub keeps rooms in memory with a single writer,
+which is exactly what a 20 Hz authoritative game wants: no store in the middle
+of the presence path.
+
+#### Option B — Vercel
+
+Vercel Functions [gained WebSocket support in June 2026](https://vercel.com/docs/functions/websockets),
+so `api/ws.ts` works there directly. Requirements:
+
+- **Fluid compute** must be enabled (default for projects created on or after
+  2025-04-23; older projects must turn it on in Project Settings → Functions).
+- WebSockets is a gated beta — the project needs the capability enabled.
+
+⚠️ **The caveat that matters for a game.** A connection is pinned to one
+function instance, but *new* connections are not guaranteed to reach the *same*
+instance. Room state here is in-memory, so two players who land on different
+instances get two different rooms sharing a code — invisible to each other.
+That is fine for a small table joining inside one warm window, and it is the
+lowest-latency path. It is not safe across a redeploy or at scale.
+
+If you hit split rooms: point the Vercel-hosted client at a dedicated hub
+(Option A) with `VITE_PERIL_WS=wss://your-hub.fly.dev/ws`, or externalise rooms
+and presence fan-out to Redis — correct, but it puts a network hop in the
+presence path.
+
+Connections also close at the function's max duration. The client reconnects
+automatically and the server restores seat, hand and score from the player id,
+so that is survivable — subject to the same instance caveat.
+
+#### Not an option
+
+Serving the client as static files with **no** WebSocket endpoint. `/ws` then
+falls through to the SPA handler, returns HTML, and every upgrade fails. The
+client now surfaces this instead of failing silently, but it still cannot play.
 
 ---
 
