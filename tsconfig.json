@@ -1,14 +1,19 @@
 {
   "compilerOptions": {
     "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "outDir": "dist",
-    "types": ["three"]
+    "noEmit": true,
+    "allowImportingTsExtensions": false,
+    "types": ["node", "vite/client"]
   },
-  "include": ["src"]
+  "include": ["src", "shared", "server", "vite.config.ts"]
 }
