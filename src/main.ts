@@ -1,9 +1,21 @@
 import * as THREE from 'three'
 import { Spring } from './spring'
 import { World, BodyMode, TUNING, qSlerp, type Body } from './physics'
-import { createCardMesh, setHighlight, Highlight, CARD_HALF, CARD_MASS, type HighlightValue } from './card'
+import {
+  createCardMesh,
+  setCardFace,
+  setSharedCardBack,
+  setHighlight,
+  Highlight,
+  CARD_HALF,
+  CARD_MASS,
+  type HighlightValue,
+} from './card'
 import { angularVelocityTo, insertionIndexAt, makeRandom, planPlayThrow, spread } from './gameplay'
 import { showPrompt, movePrompt, hidePrompt, showMarquee, hideMarquee } from './ui'
+import { buildDeck, shuffle, makeRng, type CardDef } from './packs'
+import { buildAtlas, buildCardBackTexture } from './cardart'
+import { Avatar, AVATAR_COLOURS } from './avatar'
 
 /**
  * Peril — card table.
@@ -28,8 +40,7 @@ const RAIL_TOP = TABLE_Y + 0.018
 const FLOOR_Y = TABLE_Y - 0.55
 
 const NUM_CARDS = 7
-/** A full deck, stacked face-down in the middle of the table. */
-const DECK_SIZE = 52
+/** Cards dealt to the player at the start; the rest of the pack forms the deck. */
 
 // How long you must rest on a card before its action prompt appears...
 const PROMPT_DELAY_MS = 340
@@ -120,6 +131,47 @@ ground.position.y = FLOOR_Y
 ground.receiveShadow = true
 scene.add(ground)
 
+// --- The pack -----------------------------------------------------------------
+//
+// Faces are drawn once into a single atlas and each card samples its own cell,
+// so 54 distinct faces cost one texture upload rather than 54.
+const PACK_SEED = 20260802
+const deckOrder: CardDef[] = shuffle(buildDeck('standard'), makeRng(PACK_SEED))
+const cardAtlas = buildAtlas(deckOrder)
+// Must happen before any card mesh is built, since a mesh takes the back it
+// finds at construction.
+setSharedCardBack(buildCardBackTexture())
+
+/** Cards still face-down in the deck, in the order they will be drawn. */
+let undealt = deckOrder.slice()
+
+/**
+ * Per-room look. Driven by room settings once the netcode lands; exported so the
+ * lobby can preview a change without reloading the table.
+ */
+export interface RoomTheme {
+  tableColour: string
+  railEnabled: boolean
+  backgroundColour: string
+}
+
+export const DEFAULT_THEME: RoomTheme = {
+  tableColour: '#14352a',
+  railEnabled: true,
+  backgroundColour: '#0b0b10',
+}
+
+export function applyRoomTheme(theme: RoomTheme): void {
+  ;(table.material as THREE.MeshStandardMaterial).color.set(theme.tableColour)
+  rim.visible = theme.railEnabled
+  scene.background = new THREE.Color(theme.backgroundColour)
+  // The fog has to track the background or the horizon reads as a seam.
+  ;(scene.fog as THREE.Fog).color.set(theme.backgroundColour)
+  // Whether the rail is there changes what the solver must contain.
+  world.table.railRadius = theme.railEnabled ? RAIL_RADIUS : TABLE_RADIUS
+  renderer.shadowMap.needsUpdate = true
+}
+
 // --- Physics ----------------------------------------------------------------
 const world = new World({
   surfaceY: TABLE_Y,
@@ -143,6 +195,8 @@ interface Card {
    * Cards become independent bodies only when they leave a stack.
    */
   count: number
+  /** Which card this is, once it has been dealt. A stack has no single identity. */
+  def: CardDef | null
   /** Local scale, thickening the shared card mesh to match `count`. */
   scale: THREE.Vector3
   /** Whether this card belongs to the fan in front of the camera. */
@@ -175,6 +229,7 @@ function spawnCard(count = 1): Card {
     body,
     mesh,
     count,
+    def: null,
     scale: new THREE.Vector3(1, 1, count),
     inHand: false,
     handIndex: cards.length,
@@ -251,10 +306,19 @@ function drawFromStack(stack: Card): Card {
     stack.body.p.z,
     stack.body.q,
   )
+  dealIdentity(loose)
   setCount(stack, stack.count - 1)
   if (stack.count <= 0) removeCard(stack)
   else stack.body.wake()
   return loose
+}
+
+/** Print the next undealt card onto `card`. Nothing to do if the pack is spent. */
+function dealIdentity(card: Card): void {
+  const def = undealt.pop()
+  if (!def) return
+  card.def = def
+  setCardFace(card.mesh, cardAtlas, def.id)
 }
 
 function applyHighlight(card: Card, level: HighlightValue): void {
@@ -424,6 +488,7 @@ for (let i = 0; i < NUM_CARDS; i++) {
   card.inHand = true
   card.handIndex = i
   card.body.mode = BodyMode.Held
+  dealIdentity(card)
 }
 
 /**
@@ -435,11 +500,87 @@ for (let i = 0; i < NUM_CARDS; i++) {
  * entirely, and a sleeping body is infinite mass, so an untouched deck is
  * genuinely rigid — which is what makes cards land on it rather than in it.
  */
-const deck = spawnCard(DECK_SIZE)
+// Exactly what is left after the opening hand, so the pack adds up: every card
+// on the table is one identity, and the deck is deep enough to deal the rest.
+const deckDepth = undealt.length
+const deck = spawnCard(deckDepth)
 _e.set(Math.PI / 2, 0, 0, 'YXZ')
 _q.setFromEuler(_e)
-deck.body.setTransform(0, TABLE_Y + CARD_HALF.z * DECK_SIZE, 0, _q)
+deck.body.setTransform(0, TABLE_Y + CARD_HALF.z * deckDepth, 0, _q)
 deck.body.sleep()
+
+// --- Seated players -----------------------------------------------------------
+//
+// Everyone but you. Seat 0 is the local player, who is the camera and so has no
+// avatar to look at. Each remote player gets a fan of face-down cards floating
+// in front of their chest — floating rather than held, because an avatar with no
+// hands cannot hold anything, and because a fan that is only ever backs is the
+// simplest way to be certain no one else's cards leak.
+//
+// Placeholder occupants until the netcode drives them. `docs/multiplayer.md`.
+const SEAT_COUNT = 4
+const REMOTE_FAN_ARC = 0.5
+
+interface RemotePlayer {
+  avatar: Avatar
+  fan: THREE.Mesh[]
+}
+
+const remotePlayers: RemotePlayer[] = []
+
+function seatPlayer(seat: number, nickname: string, handSize: number): RemotePlayer {
+  const avatar = new Avatar({
+    id: `seat-${seat}`,
+    nickname,
+    colour: AVATAR_COLOURS[seat % AVATAR_COLOURS.length],
+    seat,
+    seatCount: SEAT_COUNT,
+  })
+  scene.add(avatar.group)
+
+  const fan: THREE.Mesh[] = []
+  for (let i = 0; i < handSize; i++) {
+    const mesh = createCardMesh()
+    mesh.castShadow = true
+    scene.add(mesh)
+    fan.push(mesh)
+  }
+  const player = { avatar, fan }
+  remotePlayers.push(player)
+  return player
+}
+
+const _fanPos = new THREE.Vector3()
+const _fanQuat = new THREE.Quaternion()
+const _fanOffset = new THREE.Vector3()
+const _fanSpin = new THREE.Quaternion()
+const _fanEuler = new THREE.Euler()
+
+/** Lay a remote player's fan out in front of their chest, backs toward the room. */
+function layoutRemoteFans(): void {
+  for (const { avatar, fan } of remotePlayers) {
+    avatar.fanAnchor(_fanPos, _fanQuat)
+    for (let i = 0; i < fan.length; i++) {
+      const t = fan.length === 1 ? 0 : i / (fan.length - 1) - 0.5
+      const angle = t * REMOTE_FAN_ARC
+      _fanOffset.set(Math.sin(angle) * 0.09, -(1 - Math.cos(angle)) * 0.03, i * 0.0006)
+      _fanOffset.applyQuaternion(_fanQuat)
+      _fanEuler.set(0, 0, -angle)
+      _fanSpin.setFromEuler(_fanEuler)
+      fan[i].matrix.compose(
+        _fanPos.clone().add(_fanOffset),
+        _fanQuat.clone().multiply(_fanSpin),
+        new THREE.Vector3(1, 1, 1),
+      )
+      fan[i].matrixWorld.copy(fan[i].matrix)
+      fan[i].matrixWorldNeedsUpdate = false
+    }
+  }
+}
+
+seatPlayer(1, 'Sasha', 6)
+seatPlayer(2, 'Mirek', 5)
+seatPlayer(3, 'Yuna', 7)
 
 // --- Camera orbit -----------------------------------------------------------
 const camYaw = new Spring(0, 100, 14)
@@ -1052,6 +1193,9 @@ function animate(): void {
     card.mesh.matrixWorld.copy(card.mesh.matrix)
     card.mesh.matrixWorldNeedsUpdate = false
   }
+
+  for (const { avatar } of remotePlayers) avatar.update(dt, camera)
+  layoutRemoteFans()
 
   updateHover(nowMs)
 

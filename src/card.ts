@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import type { CardAtlas } from './cardart'
 
 /**
  * Card visuals. Purely presentational — every transform on screen comes from the
@@ -73,6 +74,21 @@ function buildCardGeometry(): THREE.BufferGeometry {
   geo.addGroup(0, front.length, 0)
   geo.addGroup(front.length, back.length, 1)
   geo.addGroup(front.length + back.length, sides.length, 2)
+  // Rewrite the UVs across the card face.
+  //
+  // ExtrudeGeometry lays UVs out in the shape's own units, which here is metres
+  // — so they come out around 0.06 and are useless for sampling an atlas. Derive
+  // them from vertex position instead. The back cap faces -Z, so its u is
+  // mirrored; otherwise every card's back would read as its own mirror image.
+  const pos = geo.getAttribute('position')
+  const uv = geo.getAttribute('uv')
+  for (let i = 0; i < pos.count; i++) {
+    const u = (pos.getX(i) + CARD_W / 2) / CARD_W
+    const v = (pos.getY(i) + CARD_H / 2) / CARD_H
+    uv.setXY(i, normals.getZ(i) >= 0 ? u : 1 - u, v)
+  }
+  uv.needsUpdate = true
+
   geo.computeBoundingSphere()
   return geo
 }
@@ -96,39 +112,72 @@ const edgeMaterial = new THREE.MeshStandardMaterial({
   metalness: 0.02,
 })
 
-const materials = [faceMaterial, backMaterial, edgeMaterial]
-
 /**
- * Highlight variants.
+ * Highlight levels.
  *
- * Highlighting by swapping in a *shared* material set rather than tinting a
- * per-card clone keeps every highlighted card on one set of uniforms, which
- * matters when a marquee selection lights up a dozen at once.
+ * Each card owns its three materials rather than sharing one tinted set.
+ * Sharing was cheaper and became wrong the moment cards had printed faces: a
+ * highlight that swapped in a shared material array also swapped away whichever
+ * face that card was showing. Tinting a card's own materials in place keeps the
+ * face and costs only a couple of small objects per card — the texture, which is
+ * the part that actually occupies memory, is still shared by every one of them.
  */
 export const Highlight = { None: 0, Target: 1, Pick: 2 } as const
 export type HighlightValue = (typeof Highlight)[keyof typeof Highlight]
 
-function tinted(emissive: string, intensity: number): THREE.Material[] {
-  return materials.map((m) => {
-    const c = (m as THREE.MeshStandardMaterial).clone()
-    c.emissive = new THREE.Color(emissive)
-    c.emissiveIntensity = intensity
-    return c
-  })
-}
-
-// Warm for "you are about to play onto this", cool for "you can pick this up".
-const targetMaterials = tinted('#ffa445', 0.5)
-const pickMaterials = tinted('#63d2ff', 0.42)
-
-const materialSets: THREE.Material[][] = [materials, targetMaterials, pickMaterials]
+// Warm for "you are about to drop onto this", cool for "you can pick this up".
+const HIGHLIGHT_TINTS = ['#000000', '#ffa445', '#63d2ff']
+const HIGHLIGHT_STRENGTH = [0, 0.5, 0.42]
 
 export function setHighlight(mesh: THREE.Mesh, level: HighlightValue): void {
-  mesh.material = materialSets[level]
+  for (const m of mesh.material as THREE.MeshStandardMaterial[]) {
+    m.emissive.set(HIGHLIGHT_TINTS[level])
+    m.emissiveIntensity = HIGHLIGHT_STRENGTH[level]
+  }
+}
+
+/**
+ * Give a card its own printed face.
+ *
+ * The atlas holds every face of a pack in one texture, so a card is identified
+ * by which rectangle of it to sample. That is done with a cloned Texture rather
+ * than cloned geometry: a clone shares the underlying `source`, so the GPU still
+ * holds exactly one image, while `offset` and `repeat` pick out the cell. Cloning
+ * geometry instead would mean a whole extra vertex buffer per card for the sake
+ * of two floats.
+ */
+export function setCardFace(mesh: THREE.Mesh, atlas: CardAtlas, cardId: string): void {
+  const rect = atlas.uvFor(cardId)
+  const map = atlas.texture.clone()
+  map.needsUpdate = true
+  map.offset.set(rect.x, rect.y)
+  map.repeat.set(rect.w, rect.h)
+
+  const face = (mesh.material as THREE.MeshStandardMaterial[])[0]
+  face.map = map
+  face.color.set('#ffffff')
+  face.needsUpdate = true
+}
+
+/**
+ * Print the patterned back on every card dealt from here on.
+ *
+ * Set once, when the texture has been drawn. Backs deliberately stay identical
+ * across every card — a back that differed in any readable way would be a tell.
+ */
+let sharedBack: THREE.Texture | null = null
+export function setSharedCardBack(texture: THREE.Texture): void {
+  sharedBack = texture
 }
 
 export function createCardMesh(): THREE.Mesh {
-  const mesh = new THREE.Mesh(cardGeometry, materials)
+  // Own materials, shared texture. See the note on Highlight above.
+  const back = backMaterial.clone()
+  if (sharedBack) {
+    back.map = sharedBack
+    back.color.set('#ffffff')
+  }
+  const mesh = new THREE.Mesh(cardGeometry, [faceMaterial.clone(), back, edgeMaterial.clone()])
   mesh.castShadow = true
   mesh.receiveShadow = true
   // Transforms are written every frame from the physics body, so let Three skip
