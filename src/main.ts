@@ -523,7 +523,23 @@ function cursorTarget(depth: number, out: THREE.Vector3): THREE.Vector3 {
  * Nothing steers it once released, and nothing places it — the solver decides
  * where it comes to rest.
  */
-function playOnto(target: Card): void {
+/** Drag on the aerodynamics of a card, as the throw planner needs it. */
+const FLIGHT_MODEL = {
+  gravity: TUNING.gravity,
+  damping: TUNING.linearDamping,
+  angularDamping: TUNING.angularDamping,
+  dragK: (0.5 * TUNING.aeroPressure * (CARD_HALF.x * 2) * (CARD_HALF.y * 2)) / CARD_MASS,
+}
+
+/**
+ * Drop the held card on the spot the cursor is pointing at.
+ *
+ * Not a placement: the arc and the spin that turns it face-up in flight are
+ * solved, scattered, and then the card is simply released. Nothing steers it
+ * afterwards and nothing writes its final transform — where it actually comes to
+ * rest is the solver's business, including whatever it lands on.
+ */
+function dropAtCursor(): void {
   const card = grabbed
   if (!card) return
 
@@ -532,10 +548,26 @@ function playOnto(target: Card): void {
   card.inHand = false
   reorderSlot = null
 
+  cursorOnTable(_v2)
+  // Land on the felt itself, allowing for the card's own thickness.
+  _v2.y = TABLE_Y + CARD_HALF.z * card.count
+
+  // Square it up with the way the player is facing, give or take.
+  camera.getWorldDirection(forward)
+  const viewYaw = Math.atan2(-forward.x, -forward.z)
+
   const rand = makeRandom((throwSeed = (throwSeed * 1103515245 + 12345) | 0))
   const body = card.body
-  planPlayThrow(body.p, body.q, target.body.p, target.body.q, TUNING.gravity, rand, body.v, body.w)
-
+  planPlayThrow(
+    body.p,
+    body.q,
+    _v2,
+    viewYaw,
+    FLIGHT_MODEL,
+    rand,
+    body.v,
+    body.w,
+  )
   body.wake()
   quickUntil = performance.now() + PROMPT_QUICK_MS
   clearHover()
@@ -837,8 +869,8 @@ window.addEventListener('keydown', (e) => {
   }
   // Keyed off the live action, not the prompt: the delay exists to stop the
   // hint flickering, not to make a player who already knows the key wait.
-  if (k === 'x' && hoverAction === 'X' && hoverCard) {
-    playOnto(hoverCard)
+  if (k === 'x' && hoverAction === 'X') {
+    dropAtCursor()
     return
   }
   if (k === 'z' && hoverAction === 'Z' && hoverCard) {
@@ -893,16 +925,16 @@ function updateHover(nowMs: number): void {
 
   // Holding a card: the action is to play it onto whatever is underneath.
   // Empty-handed: the action is to take the card you are pointing at.
+  // Holding a card: it can be dropped wherever the cursor is, so the action
+  // does not depend on there being anything under it.
+  // Empty-handed: the action is to take the card you are pointing at.
   let candidate: Card | null = null
   let action: 'X' | 'Z' | null = null
-  if (under && !under.inHand && !under.flying) {
-    if (grabbed) {
-      candidate = under
-      action = 'X'
-    } else if (!orbiting) {
-      candidate = under
-      action = 'Z'
-    }
+  if (grabbed) {
+    action = 'X'
+  } else if (under && !under.inHand && !under.flying && !orbiting) {
+    candidate = under
+    action = 'Z'
   }
 
   if (candidate !== hoverCard) {
@@ -912,8 +944,9 @@ function updateHover(nowMs: number): void {
     promptAction = null
     hidePrompt()
   }
+  if (action !== hoverAction && action === 'X') hoverSince = nowMs
   hoverAction = action
-  if (!hoverCard || !action) return
+  if (!action) return
 
   // The highlight and the hint wait; the key itself does not.
   const delay = nowMs < quickUntil ? 0 : PROMPT_DELAY_MS
@@ -921,12 +954,12 @@ function updateHover(nowMs: number): void {
 
   if (promptAction !== action) {
     promptAction = action
-    applyHighlight(hoverCard, action === 'X' ? Highlight.Target : Highlight.Pick)
+    if (hoverCard) applyHighlight(hoverCard, action === 'X' ? Highlight.Target : Highlight.Pick)
     showPrompt(
       action,
       action === 'X'
-        ? 'play onto this card'
-        : hoverCard.count > 1
+        ? 'drop it here'
+        : hoverCard && hoverCard.count > 1
           ? `take a card (${hoverCard.count} left)`
           : 'take this card',
       clientPos.x,

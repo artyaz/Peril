@@ -361,9 +361,18 @@ export const TUNING = {
 
   /** Air density * drag coefficient, folded together. Drives the flutter. */
   aeroPressure: 1.2 * 1.15,
-  /** How far the centre of pressure sits ahead of the CoM, as a fraction of
-   *  the card's half-length. This offset is what makes a card tumble. */
-  aeroCopFraction: 0.24,
+  /**
+   * How far the centre of pressure sits ahead of the centre of mass, as a
+   * fraction of the card's half-length. This offset is what makes a card tumble
+   * rather than sink like a stone.
+   *
+   * Eased back slightly from 0.24. It is the torque that makes a thrown card
+   * flutter, and it is also what makes a throw hard to aim: a tumbling card picks
+   * up sideways drag in a direction nothing can solve for. Removing it entirely
+   * is worse again — with nothing to right the card it keeps whatever spin it
+   * left the hand with and comes down on its edge.
+   */
+  aeroCopFraction: 0.2,
 
   maxLinearSpeed: 7.5,
   maxAngularSpeed: 42,

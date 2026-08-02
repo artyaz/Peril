@@ -78,7 +78,7 @@ const hint = el(
     'color:rgba(220,228,255,.42);pointer-events:none;white-space:nowrap;z-index:8',
 )
 hint.textContent =
-  'drag to move  ·  Z take a card  ·  X play onto a card  ·  hold C to select a group, S to square it into a stack  ·  H stats'
+  'drag to move  ·  Z take a card  ·  X drop it here  ·  hold C to select a group, S to square it into a stack  ·  H stats'
 
 export function setHint(text: string): void {
   hint.textContent = text

@@ -164,43 +164,156 @@ export function faceUpYawOf(q: Q4): number {
 
 const _aim: V3 = { x: 0, y: 0, z: 0 }
 const _faceUp: Q4 = { x: 0, y: 0, z: 0, w: 1 }
+const _sim: V3 = { x: 0, y: 0, z: 0 }
+const _simV: V3 = { x: 0, y: 0, z: 0 }
 
-/** How high over the target the arc is aimed, and how far it may miss. */
-export const PLAY_ARC_HEIGHT = 0.045
-export const PLAY_SCATTER = 0.014
-export const PLAY_YAW_JITTER = 0.4
+/** How far the throw may miss, and how far off square it may land. */
+export const PLAY_SCATTER = 0.008
+export const PLAY_YAW_JITTER = 0.35
+/** Passes of aim correction. Two is plenty; the first removes most of the miss. */
+export const PLAY_AIM_PASSES = 6
+
+/** The forces a thrown card feels, mirroring the solver's own model. */
+export interface FlightModel {
+  gravity: number
+  damping: number
+  angularDamping: number
+  /** 0.5 * airDensity * dragCoefficient * faceArea / mass. */
+  dragK: number
+}
+
+const _simQ: Q4 = { x: 0, y: 0, z: 0, w: 1 }
+const _simW: V3 = { x: 0, y: 0, z: 0 }
+const _simN: V3 = { x: 0, y: 0, z: 0 }
 
 /**
- * Work out the velocity and spin for playing a card onto another one.
+ * Fly a card forward and report where it crosses `landingY`.
+ *
+ * The orientation is integrated alongside the position, which is the whole
+ * point. Drag on a card acts along its face normal, not downward, so a card
+ * still tilted from the hand it was thrown out of gets a large *sideways* push
+ * that curves it off course. Modelling it as a face-up plate falling straight
+ * down predicts the landing to within a centimetre and is wrong by ten.
+ */
+export function simulateFlight(
+  from: V3,
+  v: V3,
+  q: Q4,
+  w: V3,
+  model: FlightModel,
+  landingY: number,
+  out: V3,
+): number {
+  _simV.x = v.x
+  _simV.y = v.y
+  _simV.z = v.z
+  _simQ.x = q.x
+  _simQ.y = q.y
+  _simQ.z = q.z
+  _simQ.w = q.w
+  _simW.x = w.x
+  _simW.y = w.y
+  _simW.z = w.z
+  out.x = from.x
+  out.y = from.y
+  out.z = from.z
+
+  const dt = 1 / 240
+  let t = 0
+  for (let i = 0; i < 1200; i++) {
+    _simV.y += model.gravity * dt
+
+    // Pressure drag along the face normal, exactly as the solver applies it.
+    rotate(_simQ, 0, 0, 1, _simN)
+    const vn = _simV.x * _simN.x + _simV.y * _simN.y + _simV.z * _simN.z
+    const a = -model.dragK * Math.abs(vn) * vn * dt
+    _simV.x += _simN.x * a
+    _simV.y += _simN.y * a
+    _simV.z += _simN.z * a
+
+    const d = Math.exp(-model.damping * dt)
+    _simV.x *= d
+    _simV.y *= d
+    _simV.z *= d
+
+    // Spin, so the normal above follows the card as it turns face-up.
+    const hx = _simW.x * dt * 0.5
+    const hy = _simW.y * dt * 0.5
+    const hz = _simW.z * dt * 0.5
+    const { x: qx, y: qy, z: qz, w: qw } = _simQ
+    _simQ.x += hx * qw + hy * qz - hz * qy
+    _simQ.y += hy * qw + hz * qx - hx * qz
+    _simQ.z += hz * qw + hx * qy - hy * qx
+    _simQ.w += -(hx * qx + hy * qy + hz * qz)
+    const l = Math.hypot(_simQ.x, _simQ.y, _simQ.z, _simQ.w) || 1
+    _simQ.x /= l
+    _simQ.y /= l
+    _simQ.z /= l
+    _simQ.w /= l
+    const ad = Math.exp(-model.angularDamping * dt)
+    _simW.x *= ad
+    _simW.y *= ad
+    _simW.z *= ad
+
+    out.x += _simV.x * dt
+    out.y += _simV.y * dt
+    out.z += _simV.z * dt
+    t += dt
+    if (out.y <= landingY && _simV.y < 0) break
+  }
+  return t
+}
+
+/**
+ * Work out the velocity and spin to drop a card on a chosen spot.
  *
  * Returns the flight time and fills `outV` / `outW`. Everything is derived from
  * a seeded generator, so every client in a room computes the identical throw.
  * Note what this does *not* do: it never writes a position or an orientation.
  * The card is launched and the solver takes it from there.
+ *
+ * The arc is aimed by iteration rather than by formula. A closed-form ballistic
+ * solution assumes a vacuum, and a card is about the worst projectile for that
+ * assumption there is: face-up and falling, it has enough drag to stay airborne
+ * appreciably longer than the formula expects and to sail 5-15cm past the mark.
+ * Flying the trajectory first and shifting the aim by however far it missed
+ * removes that in a couple of passes, and costs a few hundred multiplications
+ * once per throw.
  */
 export function planPlayThrow(
   from: V3,
   fromQ: Q4,
   target: V3,
-  targetQ: Q4,
-  gravity: number,
+  targetYaw: number,
+  model: FlightModel,
   rand: () => number,
   outV: V3,
   outW: V3,
 ): number {
-  _aim.x = target.x + spread(rand) * PLAY_SCATTER
-  _aim.y = target.y + PLAY_ARC_HEIGHT
-  _aim.z = target.z + spread(rand) * PLAY_SCATTER
+  const flight = 0.34 + rand() * 0.06
 
-  const flight = 0.3 + rand() * 0.08
-  ballisticVelocity(from, _aim, flight, gravity, outV)
-
-  // Land roughly squared with the card being beaten, but never exactly.
-  const yaw = faceUpYawOf(targetQ) + spread(rand) * PLAY_YAW_JITTER
-  faceUpQuaternion(yaw, _faceUp)
-
-  // Slightly quicker than the flight, since angular damping bleeds some off.
+  // Land roughly squared with the way the player is facing, but never exactly.
+  // Worked out first, because the spin decides how the card is angled through
+  // the flight and therefore which way drag pushes it.
+  faceUpQuaternion(targetYaw + spread(rand) * PLAY_YAW_JITTER, _faceUp)
   angularVelocityTo(fromQ, _faceUp, flight * 0.82, outW)
-  outW.y += spread(rand) * 1.8
+  outW.y += spread(rand) * 0.8
+
+  // Aim straight at the spot. Lobbing at a point above it only adds fall time
+  // for the card to drift through.
+  _aim.x = target.x + spread(rand) * PLAY_SCATTER
+  _aim.y = target.y
+  _aim.z = target.z + spread(rand) * PLAY_SCATTER
+  const wantX = _aim.x
+  const wantZ = _aim.z
+
+  for (let pass = 0; pass < PLAY_AIM_PASSES; pass++) {
+    ballisticVelocity(from, _aim, flight, model.gravity, outV)
+    if (pass === PLAY_AIM_PASSES - 1) break
+    simulateFlight(from, outV, fromQ, outW, model, target.y, _sim)
+    // Shift the aim by exactly how far the flight missed.
+    _aim.x += wantX - _sim.x
+    _aim.z += wantZ - _sim.z
+  }
   return flight
 }
