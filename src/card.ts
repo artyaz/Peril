@@ -94,6 +94,35 @@ const edgeMaterial = new THREE.MeshStandardMaterial({
 
 const materials = [faceMaterial, backMaterial, edgeMaterial]
 
+/**
+ * Highlight variants.
+ *
+ * Highlighting by swapping in a *shared* material set rather than tinting a
+ * per-card clone keeps every highlighted card on one set of uniforms, which
+ * matters when a marquee selection lights up a dozen at once.
+ */
+export const Highlight = { None: 0, Target: 1, Pick: 2 } as const
+export type HighlightValue = (typeof Highlight)[keyof typeof Highlight]
+
+function tinted(emissive: string, intensity: number): THREE.Material[] {
+  return materials.map((m) => {
+    const c = (m as THREE.MeshStandardMaterial).clone()
+    c.emissive = new THREE.Color(emissive)
+    c.emissiveIntensity = intensity
+    return c
+  })
+}
+
+// Warm for "you are about to play onto this", cool for "you can pick this up".
+const targetMaterials = tinted('#ffa445', 0.5)
+const pickMaterials = tinted('#63d2ff', 0.42)
+
+const materialSets: THREE.Material[][] = [materials, targetMaterials, pickMaterials]
+
+export function setHighlight(mesh: THREE.Mesh, level: HighlightValue): void {
+  mesh.material = materialSets[level]
+}
+
 export function createCardMesh(): THREE.Mesh {
   const mesh = new THREE.Mesh(cardGeometry, materials)
   mesh.castShadow = true
