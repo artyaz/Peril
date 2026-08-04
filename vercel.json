@@ -2,6 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "vite build",
   "outputDirectory": "dist",
+  "fluid": true,
   "functions": {
     "api/ws.ts": {
       "maxDuration": 300
