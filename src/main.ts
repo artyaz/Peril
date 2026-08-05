@@ -1,13 +1,12 @@
 /**
  * Peril entry point.
  *
- * Flow: identity → home screen → connect → 3D table.
- * The scene is created once and driven by authoritative snapshots; the overlay
- * is chrome over the top of it.
+ * Flow: identity → home → connect → lobby → open table → physics sandbox.
+ * Card interaction is the restored rigid-body sandbox (X/Z/C/S); the network
+ * layer keeps rooms, presence-ready seats, and the shared notepad.
  */
 
-import { GameScene } from './game/scene'
-import { initAvatars } from './game/avatar'
+import { createSandbox, type SandboxApi } from './game/sandbox'
 import { NetClient } from './net/client'
 import { Overlay } from './ui/overlay'
 import {
@@ -24,7 +23,6 @@ import type { RoomEvent } from '../shared/protocol'
 
 const app = document.getElementById('app')!
 
-// Dismiss the boot splash now that the module has evaluated.
 const boot = document.getElementById('boot')
 if (boot) {
   boot.style.opacity = '0'
@@ -37,12 +35,22 @@ const overlay = new Overlay(app, {
   code: roomCodeFromUrl() || recentRooms()[0]?.code || '',
 })
 
-let scene: GameScene | null = null
+let sandbox: SandboxApi | null = null
 let joined = false
 
-// The avatar model (if present) loads in parallel with the home screen, so the
-// first frame after joining is never blocked on a network fetch.
-const avatarsReady = initAvatars()
+function ensureSandbox() {
+  if (sandbox) return
+  sandbox = createSandbox(app)
+  sandbox.onHandHidden = (hidden) => overlay.setFanHidden(hidden)
+  // Keep overlay above the canvas.
+  app.appendChild(overlay.root)
+  overlay.setFanHidden(sandbox.handHidden())
+}
+
+function tearSandbox() {
+  sandbox?.dispose()
+  sandbox = null
+}
 
 // ---------------------------------------------------------------------------
 // Join
@@ -50,17 +58,6 @@ const avatarsReady = initAvatars()
 
 overlay.onHomeSubmit = async ({ name, code, create }) => {
   setPlayerName(name)
-  await avatarsReady
-
-  if (!scene) {
-    scene = new GameScene(app, net)
-    scene.onPlace = (cards) => net.sendControl({ type: 'place_cards', cards })
-    scene.onPickup = (cardIds) => net.sendControl({ type: 'pickup_cards', cardIds })
-    scene.onMove = (cards) => net.sendControl({ type: 'move_cards', cards })
-    scene.start()
-    // Keep the overlay above the canvas.
-    app.appendChild(overlay.root)
-  }
 
   net.connect({
     playerId: playerId(),
@@ -84,7 +81,10 @@ net.onSnapshot = (state) => {
     setUrlRoom(state.code)
     rememberRoom(state.code, state.name)
   }
-  scene?.applySnapshot(state)
+
+  if (state.phase === 'open') ensureSandbox()
+  else tearSandbox()
+
   overlay.render(state)
 }
 
@@ -99,8 +99,6 @@ net.onEvent = (event: RoomEvent) => {
     case 'table_open':
       overlay.toast('Table open — free play')
       break
-    case 'cards_dealt':
-      break
   }
 }
 
@@ -108,6 +106,7 @@ net.onError = (message, fatal) => {
   overlay.showError(message)
   if (fatal) {
     joined = false
+    tearSandbox()
     overlay.setView('home')
   }
 }
@@ -127,11 +126,13 @@ overlay.onLeave = () => {
   net.sendControl({ type: 'leave' })
   net.disconnect()
   joined = false
+  tearSandbox()
   overlay.setView('home')
 }
 overlay.onToggleFan = () => {
-  scene?.toggleFanHidden()
-  if (scene) overlay.setFanHidden(scene.fanHidden)
+  if (!sandbox) return
+  sandbox.setHandHidden(!sandbox.handHidden())
+  overlay.setFanHidden(sandbox.handHidden())
 }
 overlay.onNotepadChange = (text) => net.sendControl({ type: 'set_notepad', text })
 
@@ -147,5 +148,9 @@ setInterval(() => {
   }
 }, 250)
 
-// Expose a handle for debugging in the console.
-;(window as unknown as Record<string, unknown>).peril = { net, get scene() { return scene } }
+;(window as unknown as Record<string, unknown>).peril = {
+  net,
+  get sandbox() {
+    return sandbox
+  },
+}

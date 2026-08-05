@@ -318,11 +318,6 @@ export class Overlay {
       e.preventDefault()
       return
     }
-    if ((e.key === 'h' || e.key === 'H') && !typing) {
-      this.onToggleFan?.()
-      e.preventDefault()
-      return
-    }
     if (e.key === 'Escape' && this.notepadOpen) {
       this.setNotepadOpen(false)
       e.preventDefault()
@@ -448,7 +443,7 @@ export class Overlay {
       <div class="hud-bottom">
         <div class="action-bar">
           <span class="msg">
-            Drag · <kbd>Shift</kbd> multi-select · drop on table to place · near you to pick up
+            Drag · <kbd>Z</kbd> take · <kbd>X</kbd> drop · hold <kbd>C</kbd> select · <kbd>S</kbd> stack
             · <kbd>H</kbd> hide hand · <kbd>P</kbd> notepad
           </span>
           <button class="btn tiny" id="hhide">Hide hand</button>
