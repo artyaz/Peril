@@ -39,7 +39,7 @@
 
 import http from 'node:http'
 import { WebSocketServer } from 'ws'
-import { Hub } from '../server/hub'
+import { Hub } from '../server/hub.js'
 
 // Module scope: survives for the life of the instance and is shared by every
 // connection it serves.

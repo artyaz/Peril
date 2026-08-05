@@ -15,7 +15,7 @@
 import {
   ANG_SCALE,
   POS_SCALE,
-} from './constants'
+} from './constants.js'
 import {
   OP_PRESENCE_SNAPSHOT,
   OP_PRESENCE_UP,
@@ -23,7 +23,7 @@ import {
   PRESENCE_FLAG_POINTING,
   type Presence,
   type PresenceSnapshot,
-} from './protocol'
+} from './protocol.js'
 
 const I16_MIN = -32768
 const I16_MAX = 32767

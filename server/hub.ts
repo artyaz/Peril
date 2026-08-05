@@ -21,20 +21,20 @@ import {
   PROTOCOL_VERSION,
   ROOM_TTL_MS,
   TICK_MS,
-} from '../shared/constants'
+} from '../shared/constants.js'
 import {
   decodePresenceUp,
   encodePresenceSnapshot,
   peekOpcode,
   seqNewer,
-} from '../shared/codec'
+} from '../shared/codec.js'
 import {
   OP_PRESENCE_UP,
   emptyPresence,
   type ClientControl,
   type Presence,
   type ServerControl,
-} from '../shared/protocol'
+} from '../shared/protocol.js'
 import {
   addBot,
   castVote,
@@ -52,7 +52,7 @@ import {
   tick as engineTick,
   unplay,
   type ServerRoom,
-} from './engine'
+} from './engine.js'
 
 /** Server clock: ms since process start. Fits a uint32 for ~49 days, which is
  *  what lets presence timestamps ride in 4 bytes. */
