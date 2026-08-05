@@ -319,26 +319,21 @@ async function main() {
   check('joining a missing room is rejected', rejected)
 
   // ---- Game start ---------------------------------------------------------
-  section('Live server: game flow')
+  section('Live server: free play open')
 
   bob.send({ type: 'start' })
   await sleep(120)
-  check('non-host cannot start the game', alice.snapshot?.phase === 'lobby')
+  check('non-host cannot open the table', alice.snapshot?.phase === 'lobby')
 
   alice.send({ type: 'start' })
   const started = await until(
-    () => alice.snapshot?.phase === 'playing',
-    6000,
-    'playing phase',
+    () => alice.snapshot?.phase === 'open',
+    4000,
+    'open phase',
   )
-  check('host starts the game and it reaches playing', started)
-  check('a prompt was dealt', !!alice.snapshot?.prompt)
+  check('host opens the table into free play', started)
   check('hand is dealt to the local player', (alice.snapshot?.you.hand.length ?? 0) === 7)
-  check(
-    'a judge was assigned',
-    !!alice.snapshot?.judgeId &&
-      alice.snapshot.players.some((p) => p.id === alice.snapshot!.judgeId),
-  )
+  check('notepad is present', typeof alice.snapshot?.notepad === 'string')
 
   // ---- Hand privacy (the important one) -----------------------------------
   section('Hand privacy')
@@ -363,52 +358,60 @@ async function main() {
     )
   }
 
-  // ---- Playing ------------------------------------------------------------
-  section('Playing a card')
+  // ---- Free place / move / pickup ----------------------------------------
+  section('Free card movement')
   {
-    const judgeId = alice.snapshot!.judgeId
-    const players = [alice, bob, cara].filter((c) => c.snapshot!.you.id !== judgeId)
-    const judge = [alice, bob, cara].find((c) => c.snapshot!.you.id === judgeId)!
-
-    judge.send({ type: 'play_cards', cardIds: [judge.snapshot!.you.hand[0].id] })
+    const card = alice.snapshot!.you.hand[0]
+    alice.send({
+      type: 'place_cards',
+      cards: [{ id: 'not-a-real-card', x: 0.1, z: 0.05, rotY: 0 }],
+    })
     await sleep(120)
-    check('the judge cannot play a card', judge.snapshot!.you.hand.length === 7)
+    check('a card not in hand is rejected', alice.snapshot!.you.hand.length === 7)
 
-    players[0].send({ type: 'play_cards', cardIds: ['not-a-real-card'] })
-    await sleep(120)
-    check('a card not in hand is rejected', players[0].snapshot!.you.hand.length === 7)
-
-    const pick = alice.snapshot!.prompt!.pick
-    for (const c of players) {
-      c.send({
-        type: 'play_cards',
-        cardIds: c.snapshot!.you.hand.slice(0, pick).map((x) => x.id),
-      })
-    }
-    await until(() => players[0].snapshot!.you.hand.length === 7 - pick, 2000, 'hand shrinks')
-    check('played cards leave the hand', players[0].snapshot!.you.hand.length === 7 - pick)
-
-    const reachedJudging = await until(
-      () => judge.snapshot?.phase === 'judging',
-      8000,
-      'judging phase',
-    )
-    check('all plays in → reveal → judging', reachedJudging)
-    check('table cards are laid out authoritatively', (judge.snapshot?.tableCards.length ?? 0) > 0)
+    alice.send({
+      type: 'place_cards',
+      cards: [{ id: card.id, x: 0.12, z: -0.08, rotY: 0.2 }],
+    })
+    await until(() => alice.snapshot!.you.hand.length === 6, 2000, 'hand shrinks')
+    check('placed cards leave the hand', alice.snapshot!.you.hand.length === 6)
     check(
-      'revealed submissions carry text',
-      judge.snapshot!.submissions.every((s) => s.revealed && s.cards.every((c) => c.text)),
+      'placed cards appear on the table for everyone',
+      (bob.snapshot?.tableCards.some((c) => c.id === card.id && c.text === card.text) ?? false),
     )
 
-    // Judge picks a winner.
-    const target = judge.snapshot!.submissions[0].playerId
-    judge.send({ type: 'vote', submissionPlayerId: target })
-    const scored = await until(() => judge.snapshot?.phase === 'scoring', 3000, 'scoring')
-    check('the judge resolves the round', scored)
-    check(
-      'the winner scored a point',
-      (judge.snapshot?.players.find((p) => p.id === target)?.score ?? 0) === 1,
+    // Anyone can reposition a table card.
+    bob.send({
+      type: 'move_cards',
+      cards: [{ id: card.id, x: -0.15, z: 0.1, rotY: -0.3 }],
+    })
+    await until(
+      () => Math.abs((alice.snapshot?.tableCards.find((c) => c.id === card.id)?.x ?? 0) + 0.15) < 0.001,
+      2000,
+      'card moved',
     )
+    check(
+      'table card pose is authoritative',
+      Math.abs(alice.snapshot!.tableCards.find((c) => c.id === card.id)!.x + 0.15) < 0.001,
+    )
+
+    // Cara picks it up into her hand.
+    cara.send({ type: 'pickup_cards', cardIds: [card.id] })
+    await until(
+      () => cara.snapshot!.you.hand.some((c) => c.id === card.id),
+      2000,
+      'pickup',
+    )
+    check('pickup returns the card to a hand', cara.snapshot!.you.hand.some((c) => c.id === card.id))
+    check(
+      'picked-up card leaves the table',
+      !alice.snapshot!.tableCards.some((c) => c.id === card.id),
+    )
+
+    // Shared notepad.
+    alice.send({ type: 'set_notepad', text: 'Alice 3\nBob 2\nCara 1' })
+    await until(() => bob.snapshot?.notepad === 'Alice 3\nBob 2\nCara 1', 2000, 'notepad sync')
+    check('notepad syncs to peers', bob.snapshot?.notepad === 'Alice 3\nBob 2\nCara 1')
   }
 
   // ---- Presence -----------------------------------------------------------
@@ -460,9 +463,13 @@ async function main() {
     const phases = [alice, bob, cara].map((c) => c.snapshot?.phase)
     check('every client agrees on the phase', new Set(phases).size === 1)
     const scores = [alice, bob, cara].map((c) =>
-      JSON.stringify(c.snapshot?.players.map((p) => [p.seat, p.score])),
+      JSON.stringify(c.snapshot?.players.map((p) => [p.seat, p.handCount])),
     )
-    check('every client agrees on the scoreboard', new Set(scores).size === 1)
+    check('every client agrees on hand counts', new Set(scores).size === 1)
+    check(
+      'every client agrees on the notepad',
+      new Set([alice, bob, cara].map((c) => c.snapshot?.notepad)).size === 1,
+    )
   }
 
   // ---- Reconnect ----------------------------------------------------------

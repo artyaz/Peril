@@ -1,14 +1,10 @@
 /**
- * Peril game engine — pure logic, no I/O.
+ * Peril free-play engine — pure logic, no I/O.
  *
  * The server is authoritative: clients send intents, the engine validates them
- * and produces the next state. Nothing here touches sockets, which keeps it
- * trivially testable and makes the room layer a thin adapter.
- *
- * Every phase carries a deadline. A player who disconnects mid-round, rage
- * quits, or simply wanders off can never stall the table — `tick()` advances
- * the game on their behalf. That is the difference between a demo and
- * something you can actually play with seven friends.
+ * and produces the next state. There is no judge, no voting, no phase clock —
+ * once the table is open, anyone can place, pick up, and move cards at any
+ * time. The notepad is a shared scratch pad the players maintain themselves.
  */
 
 import {
@@ -16,34 +12,22 @@ import {
   HAND_SIZE,
   MAX_SEATS,
   MIN_PLAYERS,
-  TARGET_SCORE,
+  NOTEPAD_MAX,
+  TABLE_RADIUS,
 } from '../shared/constants.js'
 import type {
   CardData,
+  CardPose,
   PlayerPublic,
   RoomEvent,
   RoomPhase,
   RoomSnapshot,
-  Submission,
   TableCard,
 } from '../shared/protocol.js'
-import { buildDeck, type Prompt } from './deck.js'
+import { buildDeck } from './deck.js'
 
 // ---------------------------------------------------------------------------
-// Phase durations (ms)
-// ---------------------------------------------------------------------------
-
-const DEAL_MS = 1400
-const PLAY_MS = 90_000
-const REVEAL_STEP_MS = 850
-const JUDGE_MS = 60_000
-const SCORE_MS = 7000
-/** Bots wait a beat so the table does not snap instantly. */
-const BOT_PLAY_MIN_MS = 1800
-const BOT_PLAY_JITTER_MS = 4500
-
-// ---------------------------------------------------------------------------
-// Server-side state (superset of what any client is allowed to see)
+// Server-side state
 // ---------------------------------------------------------------------------
 
 export type ServerPlayer = {
@@ -56,11 +40,7 @@ export type ServerPlayer = {
   isBot: boolean
   avatarHue: number
   hand: CardData[]
-  /** Committed play for this round, or null. */
-  played: CardData[] | null
   disconnectedAt: number | null
-  /** Bot only: server time at which it will play. */
-  botActAt: number
 }
 
 export type ServerRoom = {
@@ -68,25 +48,14 @@ export type ServerRoom = {
   name: string
   hostId: string
   phase: RoomPhase
-  round: number
   rev: number
   players: Map<string, ServerPlayer>
   /** seat index → playerId. Length MAX_SEATS. */
   seats: (string | null)[]
-  promptPile: Prompt[]
   responsePile: string[]
   discard: string[]
-  prompt: Prompt | null
-  judgeSeat: number
-  /** Shuffled player ids — reveal + display order, hides who played what. */
-  submissionOrder: string[]
-  revealedCount: number
-  /** voterId → submission owner id. The judge's entry is binding. */
-  votes: Record<string, string>
-  roundWinnerId: string | null
-  winnerId: string | null
   tableCards: TableCard[]
-  phaseEndsAt: number
+  notepad: string
   cardSeq: number
   createdAt: number
   updatedAt: number
@@ -136,22 +105,13 @@ export function createRoom(opts: {
     name: opts.name || 'Peril',
     hostId: opts.hostId,
     phase: 'lobby',
-    round: 0,
     rev: 0,
     players: new Map(),
     seats: new Array(MAX_SEATS).fill(null),
-    promptPile: shuffle([...deck.prompts]),
     responsePile: shuffle([...deck.responses]),
     discard: [],
-    prompt: null,
-    judgeSeat: -1,
-    submissionOrder: [],
-    revealedCount: 0,
-    votes: {},
-    roundWinnerId: null,
-    winnerId: null,
     tableCards: [],
-    phaseEndsAt: 0,
+    notepad: 'Scores\n—————\n',
     cardSeq: 1,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -163,14 +123,8 @@ function activePlayers(room: ServerRoom): ServerPlayer[] {
   return [...room.players.values()].sort((a, b) => a.seat - b.seat)
 }
 
-/** Players who can act this round: connected (or bot), seated. */
 function livePlayers(room: ServerRoom): ServerPlayer[] {
   return activePlayers(room).filter((p) => p.connected || p.isBot)
-}
-
-function judgeId(room: ServerRoom): string | null {
-  if (room.judgeSeat < 0) return null
-  return room.seats[room.judgeSeat]
 }
 
 function firstFreeSeat(room: ServerRoom): number {
@@ -180,7 +134,6 @@ function firstFreeSeat(room: ServerRoom): number {
 
 function drawResponse(room: ServerRoom): string {
   if (!room.responsePile.length) {
-    // Recycle. A long game must never run dry.
     room.responsePile = shuffle(room.discard.splice(0))
     if (!room.responsePile.length) room.responsePile = ['(the deck is empty)']
   }
@@ -197,6 +150,14 @@ function refillHand(room: ServerRoom, p: ServerPlayer) {
   }
 }
 
+function clampTable(x: number, z: number): { x: number; z: number } {
+  const r = Math.hypot(x, z)
+  const max = TABLE_RADIUS * 0.94
+  if (r <= max || r < 1e-6) return { x, z }
+  const s = max / r
+  return { x: x * s, z: z * s }
+}
+
 // ---------------------------------------------------------------------------
 // Membership
 // ---------------------------------------------------------------------------
@@ -207,7 +168,6 @@ export function joinRoom(
 ): { ok: true; player: ServerPlayer } | { ok: false; error: string } {
   const existing = room.players.get(input.playerId)
   if (existing) {
-    // Reconnect — seat, hand and score survive.
     existing.connected = true
     existing.disconnectedAt = null
     if (input.name) existing.name = input.name.slice(0, 18)
@@ -228,17 +188,15 @@ export function joinRoom(
     isBot: false,
     avatarHue: input.avatarHue ?? Math.floor(Math.random() * 360),
     hand: [],
-    played: null,
     disconnectedAt: null,
-    botActAt: 0,
   }
 
   if (player.isHost) room.hostId = player.id
   room.players.set(player.id, player)
   room.seats[seat] = player.id
 
-  // Late joiners get a hand immediately so they can play the next round.
-  if (room.phase !== 'lobby') refillHand(room, player)
+  // Late joiners get a hand immediately so they can play right away.
+  if (room.phase === 'open') refillHand(room, player)
 
   emit(room, { kind: 'player_joined', name: player.name, seat })
   touch(room)
@@ -263,13 +221,11 @@ export function addBot(room: ServerRoom): boolean {
     isBot: true,
     avatarHue: Math.floor(Math.random() * 360),
     hand: [],
-    played: null,
     disconnectedAt: null,
-    botActAt: 0,
   }
   room.players.set(id, bot)
   room.seats[seat] = id
-  if (room.phase !== 'lobby') refillHand(room, bot)
+  if (room.phase === 'open') refillHand(room, bot)
   emit(room, { kind: 'player_joined', name: bot.name, seat })
   touch(room)
   return true
@@ -288,8 +244,9 @@ export function removePlayer(room: ServerRoom, playerId: string) {
   if (!p) return
   room.seats[p.seat] = null
   room.players.delete(playerId)
-  // Discard their hand so cards return to circulation.
   room.discard.push(...p.hand.map((c) => c.text))
+  // Leave their table cards — the table is shared. Just clear the owner seat
+  // association by keeping ownerSeat as-is for history.
   emit(room, { kind: 'player_left', name: p.name, seat: p.seat })
 
   if (room.hostId === playerId) {
@@ -303,243 +260,144 @@ export function removePlayer(room: ServerRoom, playerId: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Round flow
+// Free play
 // ---------------------------------------------------------------------------
 
-export function startGame(room: ServerRoom, now: number): boolean {
-  if (room.phase !== 'lobby' && room.phase !== 'ended') return false
+export function startGame(room: ServerRoom): boolean {
+  if (room.phase !== 'lobby') return false
   if (livePlayers(room).length < MIN_PLAYERS) return false
 
   for (const p of room.players.values()) {
-    p.score = 0
     p.hand = []
-    p.played = null
     refillHand(room, p)
     emit(room, { kind: 'cards_dealt', seat: p.seat, count: p.hand.length })
   }
 
-  room.round = 0
-  room.winnerId = null
-  room.judgeSeat = -1
-  room.phase = 'dealing'
-  room.phaseEndsAt = now + DEAL_MS
+  room.tableCards = []
+  room.phase = 'open'
+  emit(room, { kind: 'table_open' })
   touch(room)
   return true
 }
 
-function advanceJudge(room: ServerRoom) {
-  const seated = livePlayers(room)
-  if (!seated.length) return
-  const seats = seated.map((p) => p.seat).sort((a, b) => a - b)
-  if (room.judgeSeat < 0) {
-    room.judgeSeat = seats[0]
-    return
+export function placeCards(
+  room: ServerRoom,
+  playerId: string,
+  poses: CardPose[],
+): { ok: boolean; error?: string } {
+  if (room.phase !== 'open') return { ok: false, error: 'Table is not open yet' }
+  const p = room.players.get(playerId)
+  if (!p) return { ok: false, error: 'Unknown player' }
+  if (!poses.length) return { ok: false, error: 'Nothing to place' }
+
+  const placed: TableCard[] = []
+  const used = new Set<string>()
+
+  for (const pose of poses) {
+    if (used.has(pose.id)) return { ok: false, error: 'Duplicate card' }
+    used.add(pose.id)
+    const card = p.hand.find((c) => c.id === pose.id)
+    if (!card) return { ok: false, error: 'Card not in hand' }
+    const { x, z } = clampTable(pose.x, pose.z)
+    placed.push({
+      id: card.id,
+      ownerSeat: p.seat,
+      text: card.text,
+      x,
+      z,
+      rotY: pose.rotY,
+      faceUp: true,
+    })
   }
-  const next = seats.find((s) => s > room.judgeSeat)
-  room.judgeSeat = next ?? seats[0]
-}
 
-export function beginRound(room: ServerRoom, now: number) {
-  room.round++
-  advanceJudge(room)
-
-  if (!room.promptPile.length) {
-    const deck = buildDeck([])
-    room.promptPile = shuffle([...deck.prompts])
-  }
-  room.prompt = room.promptPile.pop() ?? null
-
-  for (const p of room.players.values()) {
-    if (p.played) room.discard.push(...p.played.map((c) => c.text))
-    p.played = null
-    refillHand(room, p)
-    if (p.isBot) {
-      p.botActAt = now + BOT_PLAY_MIN_MS + Math.random() * BOT_PLAY_JITTER_MS
-    }
-  }
-
-  room.submissionOrder = []
-  room.revealedCount = 0
-  room.votes = {}
-  room.roundWinnerId = null
-  room.tableCards = []
-  room.phase = 'playing'
-  room.phaseEndsAt = now + PLAY_MS
-
-  emit(room, { kind: 'round_start', round: room.round })
+  p.hand = p.hand.filter((c) => !used.has(c.id))
+  room.tableCards.push(...placed)
   touch(room)
+  return { ok: true }
 }
 
-/** Everyone except the judge must play. */
-function expectedPlayers(room: ServerRoom): ServerPlayer[] {
-  const jid = judgeId(room)
-  return livePlayers(room).filter((p) => p.id !== jid)
-}
-
-export function playCards(
+export function pickupCards(
   room: ServerRoom,
   playerId: string,
   cardIds: string[],
-  now: number,
 ): { ok: boolean; error?: string } {
-  if (room.phase !== 'playing') return { ok: false, error: 'Not the play phase' }
+  if (room.phase !== 'open') return { ok: false, error: 'Table is not open yet' }
   const p = room.players.get(playerId)
   if (!p) return { ok: false, error: 'Unknown player' }
-  if (p.id === judgeId(room)) return { ok: false, error: 'The judge does not play' }
-  if (p.played) return { ok: false, error: 'Already played' }
+  if (!cardIds.length) return { ok: false, error: 'Nothing to pick up' }
 
-  const need = room.prompt?.pick ?? 1
-  if (cardIds.length !== need) return { ok: false, error: `Play exactly ${need}` }
+  const used = new Set<string>()
+  const grabbed: CardData[] = []
 
-  const picked: CardData[] = []
   for (const id of cardIds) {
-    const card = p.hand.find((c) => c.id === id)
-    if (!card) return { ok: false, error: 'Card not in hand' }
-    if (picked.some((c) => c.id === id)) return { ok: false, error: 'Duplicate card' }
-    picked.push(card)
+    if (used.has(id)) return { ok: false, error: 'Duplicate card' }
+    used.add(id)
+    const idx = room.tableCards.findIndex((c) => c.id === id)
+    if (idx < 0) return { ok: false, error: 'Card not on table' }
+    const tc = room.tableCards[idx]
+    grabbed.push({ id: tc.id, text: tc.text })
   }
 
-  p.hand = p.hand.filter((c) => !cardIds.includes(c.id))
-  p.played = picked
-  emit(room, { kind: 'played', seat: p.seat })
+  room.tableCards = room.tableCards.filter((c) => !used.has(c.id))
+  p.hand.push(...grabbed)
+  touch(room)
+  return { ok: true }
+}
 
-  if (expectedPlayers(room).every((q) => q.played)) {
-    enterRevealing(room, now)
+export function moveCards(
+  room: ServerRoom,
+  playerId: string,
+  poses: CardPose[],
+): { ok: boolean; error?: string } {
+  if (room.phase !== 'open') return { ok: false, error: 'Table is not open yet' }
+  if (!room.players.has(playerId)) return { ok: false, error: 'Unknown player' }
+  if (!poses.length) return { ok: false, error: 'Nothing to move' }
+
+  for (const pose of poses) {
+    const tc = room.tableCards.find((c) => c.id === pose.id)
+    if (!tc) return { ok: false, error: 'Card not on table' }
+    const { x, z } = clampTable(pose.x, pose.z)
+    tc.x = x
+    tc.z = z
+    tc.rotY = pose.rotY
   }
   touch(room)
   return { ok: true }
 }
 
-/** Take a play back while the round is still open. */
-export function unplay(room: ServerRoom, playerId: string): boolean {
-  if (room.phase !== 'playing') return false
+export function setNotepad(room: ServerRoom, text: string): boolean {
+  room.notepad = (text ?? '').slice(0, NOTEPAD_MAX)
+  touch(room)
+  return true
+}
+
+export function setScore(room: ServerRoom, playerId: string, score: number): boolean {
   const p = room.players.get(playerId)
-  if (!p || !p.played) return false
-  p.hand.push(...p.played)
-  p.played = null
+  if (!p) return false
+  p.score = Math.max(0, Math.min(999, Math.round(score)))
   touch(room)
   return true
-}
-
-function enterRevealing(room: ServerRoom, now: number) {
-  const submitters = expectedPlayers(room).filter((p) => p.played)
-  room.submissionOrder = shuffle(submitters.map((p) => p.id))
-  room.revealedCount = 0
-  room.phase = 'revealing'
-  room.phaseEndsAt = now + REVEAL_STEP_MS
-  touch(room)
-}
-
-function enterJudging(room: ServerRoom, now: number) {
-  room.phase = 'judging'
-  room.phaseEndsAt = now + JUDGE_MS
-
-  // Lay the revealed plays out on the table so every client agrees on where
-  // each card sits — positions are authoritative, not locally invented.
-  room.tableCards = []
-  const n = room.submissionOrder.length
-  for (let i = 0; i < n; i++) {
-    const pid = room.submissionOrder[i]
-    const p = room.players.get(pid)
-    if (!p?.played) continue
-    const spread = Math.min(0.42, n * 0.09)
-    const t = n === 1 ? 0.5 : i / (n - 1)
-    const baseX = (t - 0.5) * spread * 2
-    p.played.forEach((card, ci) => {
-      room.tableCards.push({
-        id: card.id,
-        ownerSeat: p.seat,
-        text: card.text,
-        x: baseX + ci * 0.035,
-        z: -0.06 + ci * 0.02,
-        rotY: (Math.random() - 0.5) * 0.12,
-        faceUp: true,
-      })
-    })
-  }
-  touch(room)
-}
-
-export function castVote(
-  room: ServerRoom,
-  voterId: string,
-  submissionPlayerId: string,
-  now: number,
-): boolean {
-  if (room.phase !== 'judging') return false
-  if (!room.players.has(submissionPlayerId)) return false
-  if (!room.submissionOrder.includes(submissionPlayerId)) return false
-
-  room.votes[voterId] = submissionPlayerId
-
-  // Only the judge's vote resolves the round; everyone else's is advisory,
-  // which keeps the whole table engaged instead of idling during judging.
-  if (voterId === judgeId(room)) {
-    resolveRound(room, submissionPlayerId, now)
-  }
-  touch(room)
-  return true
-}
-
-function resolveRound(room: ServerRoom, winnerPlayerId: string, now: number) {
-  const winner = room.players.get(winnerPlayerId)
-  if (winner) {
-    winner.score++
-    room.roundWinnerId = winner.id
-    emit(room, { kind: 'round_won', seat: winner.seat, score: winner.score })
-    if (winner.score >= TARGET_SCORE) {
-      room.winnerId = winner.id
-      emit(room, { kind: 'game_won', seat: winner.seat })
-    }
-  }
-  room.phase = 'scoring'
-  room.phaseEndsAt = now + SCORE_MS
-  touch(room)
-}
-
-export function nextRound(room: ServerRoom, now: number) {
-  if (room.winnerId) {
-    room.phase = 'ended'
-    room.phaseEndsAt = 0
-    touch(room)
-    return
-  }
-  if (livePlayers(room).length < MIN_PLAYERS) {
-    room.phase = 'lobby'
-    room.phaseEndsAt = 0
-    touch(room)
-    return
-  }
-  beginRound(room, now)
 }
 
 export function restart(room: ServerRoom) {
   room.phase = 'lobby'
-  room.round = 0
-  room.winnerId = null
-  room.roundWinnerId = null
-  room.prompt = null
-  room.judgeSeat = -1
-  room.submissionOrder = []
-  room.votes = {}
   room.tableCards = []
-  room.phaseEndsAt = 0
+  room.notepad = 'Scores\n—————\n'
   for (const p of room.players.values()) {
     p.score = 0
-    p.played = null
+    room.discard.push(...p.hand.map((c) => c.text))
     p.hand = []
   }
   touch(room)
 }
 
 // ---------------------------------------------------------------------------
-// Tick — deadlines, bots, disconnect reaping
+// Tick — disconnect reaping only (no phase clocks)
 // ---------------------------------------------------------------------------
 
 export function tick(room: ServerRoom, now: number): boolean {
   const before = room.rev
 
-  // Reap players who never came back.
   for (const p of [...room.players.values()]) {
     if (
       !p.connected &&
@@ -551,103 +409,15 @@ export function tick(room: ServerRoom, now: number): boolean {
     }
   }
 
-  switch (room.phase) {
-    case 'dealing': {
-      if (now >= room.phaseEndsAt) beginRound(room, now)
-      break
-    }
-
-    case 'playing': {
-      // Bots commit on their own schedule.
-      for (const p of room.players.values()) {
-        if (!p.isBot || p.played || p.id === judgeId(room)) continue
-        if (now >= p.botActAt) {
-          const need = room.prompt?.pick ?? 1
-          const ids = shuffle([...p.hand]).slice(0, need).map((c) => c.id)
-          if (ids.length === need) playCards(room, p.id, ids, now)
-        }
-      }
-      // Deadline: auto-play for anyone still holding out.
-      if (room.phase === 'playing' && now >= room.phaseEndsAt) {
-        for (const p of expectedPlayers(room)) {
-          if (p.played) continue
-          const need = room.prompt?.pick ?? 1
-          const ids = shuffle([...p.hand]).slice(0, need).map((c) => c.id)
-          if (ids.length === need) playCards(room, p.id, ids, now)
-        }
-        if (room.phase === 'playing') enterRevealing(room, now)
-      }
-      break
-    }
-
-    case 'revealing': {
-      if (now >= room.phaseEndsAt) {
-        if (room.revealedCount < room.submissionOrder.length) {
-          emit(room, { kind: 'reveal', index: room.revealedCount })
-          room.revealedCount++
-          room.phaseEndsAt = now + REVEAL_STEP_MS
-          touch(room)
-        } else {
-          enterJudging(room, now)
-        }
-      }
-      break
-    }
-
-    case 'judging': {
-      const jid = judgeId(room)
-      const judge = jid ? room.players.get(jid) : null
-
-      // A bot judge decides quickly; a human judge gets the full clock.
-      if (judge?.isBot && now >= room.phaseEndsAt - JUDGE_MS + 2500) {
-        const pick = room.submissionOrder[
-          Math.floor(Math.random() * room.submissionOrder.length)
-        ]
-        if (pick) castVote(room, judge.id, pick, now)
-      } else if (now >= room.phaseEndsAt) {
-        // Judge went silent: fall back to the advisory tally, then to random.
-        const tally = new Map<string, number>()
-        for (const target of Object.values(room.votes)) {
-          tally.set(target, (tally.get(target) ?? 0) + 1)
-        }
-        let best: string | null = null
-        let bestN = -1
-        for (const [id, n] of tally) {
-          if (n > bestN) {
-            best = id
-            bestN = n
-          }
-        }
-        const pick =
-          best ??
-          room.submissionOrder[Math.floor(Math.random() * room.submissionOrder.length)]
-        if (pick) resolveRound(room, pick, now)
-        else nextRound(room, now)
-      }
-      break
-    }
-
-    case 'scoring': {
-      if (now >= room.phaseEndsAt) nextRound(room, now)
-      break
-    }
-  }
-
   return room.rev !== before
 }
 
 // ---------------------------------------------------------------------------
 // Per-viewer serialisation
-//
-// Hands are never broadcast. A client physically cannot see another player's
-// cards because the bytes never leave the server — the only defence that
-// actually holds up.
 // ---------------------------------------------------------------------------
 
 export function snapshotFor(room: ServerRoom, viewerId: string): RoomSnapshot {
   const viewer = room.players.get(viewerId)
-  const jid = judgeId(room)
-  const hideAuthors = room.phase === 'playing' || room.phase === 'revealing'
 
   const players: PlayerPublic[] = activePlayers(room).map((p) => ({
     id: p.id,
@@ -658,46 +428,23 @@ export function snapshotFor(room: ServerRoom, viewerId: string): RoomSnapshot {
     isHost: p.isHost,
     isBot: p.isBot,
     handCount: p.hand.length,
-    hasPlayed: p.played !== null,
     avatarHue: p.avatarHue,
   }))
-
-  const submissions: Submission[] = room.submissionOrder.map((pid, i) => {
-    const p = room.players.get(pid)
-    const revealed = room.phase === 'judging' || i < room.revealedCount
-    const own = pid === viewerId
-    return {
-      playerId: hideAuthors && !own && !revealed ? `hidden:${i}` : pid,
-      cards: revealed || own ? (p?.played ?? []) : (p?.played ?? []).map((c) => ({
-        id: c.id,
-        text: '',
-      })),
-      revealed,
-    }
-  })
 
   return {
     code: room.code,
     name: room.name,
     phase: room.phase,
-    round: room.round,
     hostId: room.hostId,
-    judgeId: jid,
     players,
-    prompt: room.prompt,
-    submissions,
-    votes: room.phase === 'judging' || room.phase === 'scoring' ? room.votes : {},
-    winnerId: room.winnerId,
-    roundWinnerId: room.roundWinnerId,
     tableCards: room.tableCards,
-    phaseEndsAt: room.phaseEndsAt || null,
+    notepad: room.notepad,
     rev: room.rev,
     you: {
       id: viewerId,
       seat: viewer?.seat ?? -1,
       hand: viewer?.hand ?? [],
       isHost: viewer?.isHost ?? false,
-      isJudge: viewerId === jid,
     },
   }
 }

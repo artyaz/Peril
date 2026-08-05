@@ -3,8 +3,8 @@
  *
  * Two channels share one WebSocket:
  *
- *   1. Control  (JSON, reliable, event-driven) — joins, phase changes, plays,
- *      votes, authoritative room snapshots. Low rate, high value.
+ *   1. Control  (JSON, reliable, event-driven) — joins, card placements, notepad,
+ *      authoritative room snapshots. Low rate, high value.
  *   2. Presence (binary, 20 Hz, lossy-by-design) — head pose, hover, live card
  *      drags. High rate, individually disposable: a dropped presence packet is
  *      corrected 50 ms later by the next one, so it never blocks.
@@ -17,27 +17,20 @@
 // Domain types
 // ---------------------------------------------------------------------------
 
-export type RoomPhase =
-  | 'lobby'
-  | 'dealing'
-  | 'playing'
-  | 'revealing'
-  | 'judging'
-  | 'scoring'
-  | 'ended'
+/** Lobby waiting room, or open free-play at the table. */
+export type RoomPhase = 'lobby' | 'open'
 
 export type PlayerPublic = {
   id: string
   name: string
   seat: number
+  /** Soft score — players maintain meaning via the shared notepad. */
   score: number
   connected: boolean
   isHost: boolean
   isBot: boolean
   /** Card count only — never the contents of someone else's hand. */
   handCount: number
-  /** Has this player committed their play this round? */
-  hasPlayed: boolean
   avatarHue: number
 }
 
@@ -45,14 +38,6 @@ export type PlayerPublic = {
 export type CardData = {
   id: string
   text: string
-}
-
-/** One player's committed play for the round. */
-export type Submission = {
-  /** Anonymised to `hidden:<n>` until the reveal phase. */
-  playerId: string
-  cards: CardData[]
-  revealed: boolean
 }
 
 /** A card resting on the shared table surface, in table space. */
@@ -66,6 +51,14 @@ export type TableCard = {
   faceUp: boolean
 }
 
+/** One card placement / move intent (table space). */
+export type CardPose = {
+  id: string
+  x: number
+  z: number
+  rotY: number
+}
+
 /**
  * Authoritative room snapshot. `you` is the only per-recipient field — it is
  * why the server serialises state per viewer instead of broadcasting one blob.
@@ -74,19 +67,11 @@ export type RoomSnapshot = {
   code: string
   name: string
   phase: RoomPhase
-  round: number
   hostId: string
-  judgeId: string | null
   players: PlayerPublic[]
-  prompt: { text: string; pick: number } | null
-  submissions: Submission[]
-  /** voterId → submission owner id. Present from `judging` onward. */
-  votes: Record<string, string>
-  winnerId: string | null
-  roundWinnerId: string | null
   tableCards: TableCard[]
-  /** Server-authoritative deadline for the current phase (server clock, ms). */
-  phaseEndsAt: number | null
+  /** Shared freeform text board — scores, notes, whatever the table wants. */
+  notepad: string
   /** Monotonic version — clients discard out-of-order snapshots. */
   rev: number
   you: {
@@ -94,7 +79,6 @@ export type RoomSnapshot = {
     seat: number
     hand: CardData[]
     isHost: boolean
-    isJudge: boolean
   }
 }
 
@@ -116,11 +100,16 @@ export type ClientControl =
   | { type: 'start' }
   | { type: 'add_bot' }
   | { type: 'remove_bot'; playerId: string }
-  | { type: 'play_cards'; cardIds: string[] }
-  | { type: 'unplay' }
-  | { type: 'vote'; submissionPlayerId: string }
-  | { type: 'next_round' }
+  /** Move cards from your hand onto the table at the given poses. */
+  | { type: 'place_cards'; cards: CardPose[] }
+  /** Take table cards back into your hand. */
+  | { type: 'pickup_cards'; cardIds: string[] }
+  /** Reposition cards already on the table. */
+  | { type: 'move_cards'; cards: CardPose[] }
+  /** Replace the shared notepad contents. */
+  | { type: 'set_notepad'; text: string }
   | { type: 'set_name'; name: string }
+  | { type: 'set_score'; playerId: string; score: number }
   | { type: 'restart' }
   | { type: 'leave' }
   /** Cheap RTT probe. `t` is echoed back untouched. */
@@ -141,12 +130,8 @@ export type ServerControl =
 export type RoomEvent =
   | { kind: 'player_joined'; name: string; seat: number }
   | { kind: 'player_left'; name: string; seat: number }
-  | { kind: 'round_start'; round: number }
   | { kind: 'cards_dealt'; seat: number; count: number }
-  | { kind: 'played'; seat: number }
-  | { kind: 'reveal'; index: number }
-  | { kind: 'round_won'; seat: number; score: number }
-  | { kind: 'game_won'; seat: number }
+  | { kind: 'table_open' }
 
 // ---------------------------------------------------------------------------
 // Presence channel (binary)

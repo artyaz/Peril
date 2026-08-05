@@ -8,7 +8,7 @@
  *    out every tick, but only to rooms with someone to see it.
  *  - Presence is relayed, not simulated: the server trusts a client's own head
  *    pose and drag position because faking those wins you nothing. Anything
- *    that affects scoring goes through the engine and is validated.
+ *    that affects card ownership goes through the engine and is validated.
  *  - Every socket carries a `seat`, so presence packets need no id lookup on
  *    the hot path.
  */
@@ -37,20 +37,21 @@ import {
 } from '../shared/protocol.js'
 import {
   addBot,
-  castVote,
   createRoom,
   drainEvents,
   joinRoom,
   makeRoomCode,
   markDisconnected,
-  nextRound,
-  playCards,
+  moveCards,
+  pickupCards,
+  placeCards,
   removePlayer,
   restart,
+  setNotepad,
+  setScore,
   snapshotFor,
   startGame,
   tick as engineTick,
-  unplay,
   type ServerRoom,
 } from './engine.js'
 
@@ -267,18 +268,17 @@ export class Hub {
   private onControl(client: Client, msg: ClientControl) {
     const rt = this.rooms.get(client.code)
     if (!rt) return
-    const now = serverNow()
     const room = rt.room
 
     switch (msg.type) {
       case 'ping':
-        send(client.ws, { type: 'pong', t: msg.t, serverTime: now })
+        send(client.ws, { type: 'pong', t: msg.t, serverTime: serverNow() })
         return
 
       case 'start':
         if (room.hostId === client.playerId) {
-          if (!startGame(room, now)) {
-            send(client.ws, { type: 'error', message: 'Need at least 3 players — add a bot?' })
+          if (!startGame(room)) {
+            send(client.ws, { type: 'error', message: 'Could not open the table.' })
           }
         }
         break
@@ -295,22 +295,30 @@ export class Hub {
         break
       }
 
-      case 'play_cards': {
-        const res = playCards(room, client.playerId, msg.cardIds, now)
-        if (!res.ok) send(client.ws, { type: 'error', message: res.error ?? 'Could not play' })
+      case 'place_cards': {
+        const res = placeCards(room, client.playerId, msg.cards)
+        if (!res.ok) send(client.ws, { type: 'error', message: res.error ?? 'Could not place' })
         break
       }
 
-      case 'unplay':
-        unplay(room, client.playerId)
+      case 'pickup_cards': {
+        const res = pickupCards(room, client.playerId, msg.cardIds)
+        if (!res.ok) send(client.ws, { type: 'error', message: res.error ?? 'Could not pick up' })
+        break
+      }
+
+      case 'move_cards': {
+        const res = moveCards(room, client.playerId, msg.cards)
+        if (!res.ok) send(client.ws, { type: 'error', message: res.error ?? 'Could not move' })
+        break
+      }
+
+      case 'set_notepad':
+        setNotepad(room, msg.text)
         break
 
-      case 'vote':
-        castVote(room, client.playerId, msg.submissionPlayerId, now)
-        break
-
-      case 'next_round':
-        if (room.hostId === client.playerId && room.phase === 'scoring') nextRound(room, now)
+      case 'set_score':
+        setScore(room, msg.playerId, msg.score)
         break
 
       case 'restart':
@@ -361,7 +369,6 @@ export class Hub {
       }
 
       if (engineTick(rt.room, now)) {
-        // Seats may have changed (reaped players) — resync presence slots.
         for (let s = 0; s < MAX_SEATS; s++) {
           if (rt.room.seats[s] === null) rt.presence[s] = null
         }
@@ -377,8 +384,6 @@ export class Hub {
   private heartbeat(rt: RoomRuntime) {
     for (const client of rt.clients.values()) {
       if (!client.alive) {
-        // Missed two beats: the socket is a zombie. Close it so the grace
-        // timer starts and the seat is eventually freed.
         try {
           client.ws.terminate()
         } catch {
@@ -411,7 +416,6 @@ export class Hub {
   }
 
   private broadcastPresence(rt: RoomRuntime, now: number) {
-    // Nobody to see it — skip the encode entirely.
     if (rt.clients.size < 2) return
 
     const players: Presence[] = []
@@ -429,8 +433,6 @@ export class Hub {
     const buf = encodePresenceSnapshot({ serverTime: now, players })
     for (const client of rt.clients.values()) {
       if (client.ws.readyState !== 1) continue
-      // Skip a socket that is already backed up — presence is disposable, and
-      // queueing it behind a slow link only makes the backlog worse.
       if (client.ws.bufferedAmount > 64 * 1024) continue
       try {
         client.ws.send(buf, { binary: true })

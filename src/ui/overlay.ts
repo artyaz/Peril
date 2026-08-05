@@ -1,13 +1,13 @@
 /**
- * DOM overlay: home, lobby, in-game HUD, connection state.
+ * DOM overlay: home, lobby, lightweight free-play chrome, notepad.
  *
  * Deliberately framework-free. The 3D scene is the product; the UI is a thin
  * chrome over it, and vanilla DOM keeps the bundle small and the frame budget
  * intact — no reconciliation work competing with the render loop.
  */
 
-import { MIN_PLAYERS, TARGET_SCORE } from '../../shared/constants'
-import type { RoomPhase, RoomSnapshot } from '../../shared/protocol'
+import { MIN_PLAYERS, NOTEPAD_MAX } from '../../shared/constants'
+import type { RoomSnapshot } from '../../shared/protocol'
 import type { NetStatus } from '../net/client'
 import { recentRooms, type RecentRoom } from '../lib/session'
 
@@ -58,15 +58,22 @@ const CSS = `
 
 label { display: block; font-size: 12px; font-weight: 600; letter-spacing: 0.05em;
         text-transform: uppercase; color: var(--ink-dim); margin: 0 0 7px; }
-input[type=text] {
+input[type=text], textarea {
   width: 100%; padding: 12px 14px; border-radius: 11px;
   background: rgba(255,255,255,0.05);
   border: 1px solid var(--panel-line);
   color: var(--ink); font-size: 15px; outline: none;
   transition: border-color .15s, background .15s;
 }
-input[type=text]:focus { border-color: var(--accent); background: rgba(255,255,255,0.08); }
+input[type=text]:focus, textarea:focus {
+  border-color: var(--accent); background: rgba(255,255,255,0.08);
+}
 input.code { text-transform: uppercase; letter-spacing: 0.26em; font-weight: 700; }
+textarea {
+  resize: vertical; min-height: 180px; line-height: 1.45;
+  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13.5px;
+}
 
 .row { display: flex; gap: 10px; }
 .row > * { flex: 1; }
@@ -84,9 +91,9 @@ input.code { text-transform: uppercase; letter-spacing: 0.26em; font-weight: 700
 .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
 .btn.primary:hover:not(:disabled) { background: #ffd08a; }
 .btn.ghost { background: transparent; }
+.btn.tiny { padding: 7px 11px; font-size: 12.5px; border-radius: 9px; }
 
 .hint { font-size: 12.5px; color: var(--ink-dim); margin-top: 14px; line-height: 1.5; }
-/* Neutral while connecting; red only once the attempt has actually failed. */
 .err {
   margin-top: 14px; padding: 10px 13px; border-radius: 10px; font-size: 13.5px;
   line-height: 1.5;
@@ -137,34 +144,30 @@ input.code { text-transform: uppercase; letter-spacing: 0.26em; font-weight: 700
   display: flex; align-items: flex-start; justify-content: space-between;
   padding: 16px 18px; gap: 14px;
 }
-.prompt-chip {
+.room-chip {
   pointer-events: auto;
-  max-width: 500px; padding: 13px 17px; border-radius: 14px;
+  padding: 11px 14px; border-radius: 14px;
   background: var(--panel); border: 1px solid var(--panel-line);
   backdrop-filter: blur(11px);
   box-shadow: 0 12px 34px rgba(0,0,0,.42);
+  font-size: 13px;
 }
-.prompt-chip .phase {
-  font-size: 10.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
-  color: var(--accent); margin-bottom: 5px; display: flex; gap: 9px; align-items: center;
+.room-chip .code {
+  font-weight: 800; letter-spacing: 0.14em; color: var(--accent); font-size: 15px;
 }
-.prompt-chip .txt { font-size: 15.5px; font-weight: 600; line-height: 1.42; }
-.timer {
-  font-variant-numeric: tabular-nums; color: var(--ink-dim); font-weight: 700;
-}
+.room-chip .meta { color: var(--ink-dim); margin-top: 3px; font-size: 12px; }
 
-.scores {
+.roster {
   pointer-events: auto;
-  min-width: 178px; padding: 11px 13px; border-radius: 14px;
+  min-width: 160px; padding: 11px 13px; border-radius: 14px;
   background: var(--panel); border: 1px solid var(--panel-line);
   backdrop-filter: blur(11px); font-size: 13px;
 }
-.score-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
-.score-row .swatch { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.score-row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.score-row .pts { font-weight: 750; font-variant-numeric: tabular-nums; }
-.score-row.judge .nm { color: var(--accent); }
-.score-row.off { opacity: .42; }
+.roster-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+.roster-row .swatch { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.roster-row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.roster-row .pts { font-weight: 750; font-variant-numeric: tabular-nums; color: var(--ink-dim); }
+.roster-row.off { opacity: .42; }
 
 .hud-bottom {
   position: absolute; bottom: 0; left: 0; right: 0;
@@ -172,13 +175,38 @@ input.code { text-transform: uppercase; letter-spacing: 0.26em; font-weight: 700
   padding: 18px;
 }
 .action-bar {
-  pointer-events: auto; display: flex; align-items: center; gap: 11px;
+  pointer-events: auto; display: flex; align-items: center; gap: 10px;
   padding: 10px 13px; border-radius: 14px;
   background: var(--panel); border: 1px solid var(--panel-line);
   backdrop-filter: blur(11px);
 }
-.action-bar .msg { font-size: 13.5px; color: var(--ink-dim); }
-.action-bar .msg strong { color: var(--ink); font-weight: 650; }
+.action-bar .msg { font-size: 12.5px; color: var(--ink-dim); }
+.action-bar kbd {
+  display: inline-block; min-width: 1.4em; padding: 1px 5px; margin: 0 1px;
+  border-radius: 5px; border: 1px solid var(--panel-line);
+  background: rgba(255,255,255,0.06); font: 650 11px ui-monospace, Menlo, monospace;
+  color: var(--ink); text-align: center;
+}
+
+/* ---------- notepad ---------- */
+.notepad {
+  position: absolute; top: 72px; right: 18px;
+  width: min(320px, calc(100vw - 36px));
+  pointer-events: auto;
+  padding: 14px; border-radius: 16px;
+  background: var(--panel); border: 1px solid var(--panel-line);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 18px 50px rgba(0,0,0,.45);
+}
+.notepad-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; margin-bottom: 10px;
+}
+.notepad-head h2 {
+  margin: 0; font-size: 13px; font-weight: 750; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--accent);
+}
+.notepad .hint { margin-top: 8px; }
 
 /* ---------- net pill ---------- */
 .netpill {
@@ -209,16 +237,6 @@ input.code { text-transform: uppercase; letter-spacing: 0.26em; font-weight: 700
 .hidden { display: none !important; }
 `
 
-const PHASE_LABEL: Record<RoomPhase, string> = {
-  lobby: 'Lobby',
-  dealing: 'Dealing',
-  playing: 'Play a card',
-  revealing: 'Revealing',
-  judging: 'Judging',
-  scoring: 'Round over',
-  ended: 'Game over',
-}
-
 export type HomeSubmit = {
   name: string
   code: string
@@ -231,19 +249,28 @@ export class Overlay {
   onHomeSubmit: ((v: HomeSubmit) => void) | null = null
   onStart: (() => void) | null = null
   onAddBot: (() => void) | null = null
-  onNextRound: (() => void) | null = null
   onRestart: (() => void) | null = null
   onLeave: (() => void) | null = null
+  onToggleFan: (() => void) | null = null
+  onNotepadChange: ((text: string) => void) | null = null
 
   private homeEl!: HTMLDivElement
   private lobbyEl!: HTMLDivElement
   private hudEl!: HTMLDivElement
+  private notepadEl!: HTMLDivElement
+  private notepadInput!: HTMLTextAreaElement
   private toastEl!: HTMLDivElement
   private netEl!: HTMLDivElement
   private errEl!: HTMLDivElement
   private joinBtn!: HTMLButtonElement
   private createBtn!: HTMLButtonElement
+  private hideFanBtn!: HTMLButtonElement
   private busy = false
+  private notepadOpen = false
+  private notepadLocal = ''
+  private notepadDirty = false
+  private fanHidden = false
+  private notepadTimer: ReturnType<typeof setTimeout> | null = null
 
   /** Current view — read by callers deciding whether to route input to the UI. */
   view: 'home' | 'lobby' | 'game' = 'home'
@@ -256,7 +283,7 @@ export class Overlay {
     const link = document.createElement('link')
     link.rel = 'stylesheet'
     link.href =
-      'https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap'
+      'https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@400;600;700;800&display=swap'
     document.head.appendChild(link)
 
     this.root = document.createElement('div')
@@ -266,6 +293,7 @@ export class Overlay {
     this.buildHome(opts)
     this.buildLobby()
     this.buildHud()
+    this.buildNotepad()
 
     this.toastEl = el('div', 'toasts')
     this.root.appendChild(this.toastEl)
@@ -273,6 +301,32 @@ export class Overlay {
     this.netEl = el('div', 'netpill hidden')
     this.netEl.innerHTML = '<span class="led"></span><span class="txt">—</span>'
     this.root.appendChild(this.netEl)
+
+    window.addEventListener('keydown', this.onKey)
+  }
+
+  private onKey = (e: KeyboardEvent) => {
+    if (this.view !== 'game') return
+    if (e.repeat) return
+    const t = e.target
+    const typing =
+      t instanceof HTMLElement &&
+      (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)
+
+    if ((e.key === 'p' || e.key === 'P') && !typing) {
+      this.setNotepadOpen(!this.notepadOpen)
+      e.preventDefault()
+      return
+    }
+    if ((e.key === 'h' || e.key === 'H') && !typing) {
+      this.onToggleFan?.()
+      e.preventDefault()
+      return
+    }
+    if (e.key === 'Escape' && this.notepadOpen) {
+      this.setNotepadOpen(false)
+      e.preventDefault()
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -283,8 +337,8 @@ export class Overlay {
 
     panel.innerHTML = `
       <div class="brand"><span class="dot"></span><h1>Peril</h1></div>
-      <p class="sub">A card game around a shared 3D table. Everyone sees the same
-        room, the same cards, and each other's hands in real time.</p>
+      <p class="sub">A shared 3D table for free play. Drag, select, group, and
+        move cards with friends — no turns, no judge, no scripts.</p>
       <div class="field">
         <label for="nm">Your name</label>
         <input id="nm" type="text" maxlength="18" placeholder="Alex" autocomplete="nickname" />
@@ -307,8 +361,6 @@ export class Overlay {
     codeInput.value = opts.code
 
     const submit = (create: boolean) => {
-      // Guard against a second click while a connection is already in flight.
-      // Each extra click used to start another independent socket + retry loop.
       if (this.busy) return
       const name = nameInput.value.trim() || 'Player'
       const code = codeInput.value.trim().toUpperCase()
@@ -366,7 +418,7 @@ export class Overlay {
       <div class="seats" id="lseats"></div>
       <div class="row">
         <button class="btn" id="bot">Add bot</button>
-        <button class="btn primary" id="start">Start game</button>
+        <button class="btn primary" id="start">Open table</button>
       </div>
       <div class="hint" id="lhint"></div>
     `
@@ -387,24 +439,80 @@ export class Overlay {
     const hud = el('div', 'hidden')
     hud.innerHTML = `
       <div class="hud-top">
-        <div class="prompt-chip">
-          <div class="phase"><span id="hphase">—</span><span class="timer" id="htimer"></span></div>
-          <div class="txt" id="hprompt">—</div>
+        <div class="room-chip">
+          <div class="code" id="hcode">—</div>
+          <div class="meta" id="hmeta">Free play</div>
         </div>
-        <div class="scores" id="hscores"></div>
+        <div class="roster" id="hroster"></div>
       </div>
       <div class="hud-bottom">
         <div class="action-bar">
-          <span class="msg" id="hmsg">—</span>
-          <button class="btn ghost hidden" id="hnext">Next round</button>
-          <button class="btn ghost hidden" id="hrestart">Play again</button>
+          <span class="msg">
+            Drag · <kbd>Shift</kbd> multi-select · drop on table to place · near you to pick up
+            · <kbd>H</kbd> hide hand · <kbd>P</kbd> notepad
+          </span>
+          <button class="btn tiny" id="hhide">Hide hand</button>
+          <button class="btn tiny" id="hpad">Notepad</button>
+          <button class="btn ghost hidden" id="hrestart">Back to lobby</button>
         </div>
       </div>
     `
-    hud.querySelector('#hnext')!.addEventListener('click', () => this.onNextRound?.())
+    this.hideFanBtn = hud.querySelector<HTMLButtonElement>('#hhide')!
+    this.hideFanBtn.addEventListener('click', () => {
+      this.onToggleFan?.()
+    })
+    hud.querySelector('#hpad')!.addEventListener('click', () => {
+      this.setNotepadOpen(!this.notepadOpen)
+    })
     hud.querySelector('#hrestart')!.addEventListener('click', () => this.onRestart?.())
     this.root.appendChild(hud)
     this.hudEl = hud as HTMLDivElement
+  }
+
+  private buildNotepad() {
+    const pad = el('div', 'notepad hidden')
+    pad.innerHTML = `
+      <div class="notepad-head">
+        <h2>Table notepad</h2>
+        <button class="btn tiny" id="padclose">Close</button>
+      </div>
+      <textarea id="padbody" maxlength="${NOTEPAD_MAX}" spellcheck="false"
+        placeholder="Scores, rules you invent, whatever the table needs…"></textarea>
+      <div class="hint">Shared with everyone. Edit freely — players maintain it.</div>
+    `
+    this.notepadInput = pad.querySelector('#padbody')!
+    pad.querySelector('#padclose')!.addEventListener('click', () => this.setNotepadOpen(false))
+    this.notepadInput.addEventListener('input', () => {
+      this.notepadDirty = true
+      this.notepadLocal = this.notepadInput.value
+      if (this.notepadTimer) clearTimeout(this.notepadTimer)
+      this.notepadTimer = setTimeout(() => {
+        this.onNotepadChange?.(this.notepadLocal)
+        this.notepadDirty = false
+      }, 280)
+    })
+    this.root.appendChild(pad)
+    this.notepadEl = pad
+  }
+
+  private syncFanButton() {
+    this.hideFanBtn.textContent = this.fanHidden ? 'Show hand' : 'Hide hand'
+  }
+
+  setNotepadOpen(open: boolean) {
+    this.notepadOpen = open
+    this.notepadEl.classList.toggle('hidden', !open)
+    if (open) {
+      // Defer focus so the same keydown that opened it does not type into it.
+      setTimeout(() => this.notepadInput.focus(), 0)
+    } else {
+      this.notepadInput.blur()
+    }
+  }
+
+  setFanHidden(hidden: boolean) {
+    this.fanHidden = hidden
+    this.syncFanButton()
   }
 
   // -------------------------------------------------------------------------
@@ -415,15 +523,9 @@ export class Overlay {
     this.lobbyEl.classList.toggle('hidden', view !== 'lobby')
     this.hudEl.classList.toggle('hidden', view !== 'game')
     this.netEl.classList.toggle('hidden', view === 'home')
+    if (view !== 'game') this.setNotepadOpen(false)
   }
 
-  /**
-   * Reflect an in-flight connection on the home screen.
-   *
-   * Without this the join/create buttons fired into a promise and the UI never
-   * changed, so a server that could not be reached looked exactly like a dead
-   * button. Silence is the worst possible failure mode.
-   */
   setConnecting(on: boolean) {
     this.busy = on
     this.joinBtn.disabled = on
@@ -432,7 +534,6 @@ export class Overlay {
     this.createBtn.textContent = on ? '…' : 'Create new'
   }
 
-  /** Progress note while connecting — keeps the buttons disabled. */
   showConnectingHint(message: string) {
     this.errEl.textContent = message
     this.errEl.classList.remove('hidden', 'fatal')
@@ -442,7 +543,6 @@ export class Overlay {
     this.errEl.textContent = message
     this.errEl.classList.remove('hidden')
     this.errEl.classList.add('fatal')
-    // An error means the attempt is over — give the buttons back.
     this.setConnecting(false)
   }
 
@@ -472,11 +572,11 @@ export class Overlay {
     }
   }
 
-  render(state: RoomSnapshot, serverNow: number) {
+  render(state: RoomSnapshot) {
     const inLobby = state.phase === 'lobby'
     this.setView(inLobby ? 'lobby' : 'game')
     if (inLobby) this.renderLobby(state)
-    else this.renderHud(state, serverNow)
+    else this.renderHud(state)
   }
 
   private renderLobby(s: RoomSnapshot) {
@@ -505,82 +605,37 @@ export class Overlay {
     botBtn.disabled = !s.you.isHost || s.players.length >= 8
 
     panel.querySelector('#lhint')!.textContent = !s.you.isHost
-      ? 'Waiting for the host to start…'
-      : enough
-        ? `First to ${TARGET_SCORE} points wins.`
-        : `Need ${MIN_PLAYERS - s.players.length} more player(s) — or add a bot.`
+      ? 'Waiting for the host to open the table…'
+      : 'Open the table whenever you are ready — free play, no turns.'
   }
 
-  private renderHud(s: RoomSnapshot, serverNow: number) {
+  private renderHud(s: RoomSnapshot) {
     const hud = this.hudEl
-    hud.querySelector('#hphase')!.textContent = `${PHASE_LABEL[s.phase]} · Round ${s.round}`
-    hud.querySelector('#hprompt')!.textContent = s.prompt?.text ?? '—'
+    hud.querySelector('#hcode')!.textContent = s.code
+    hud.querySelector('#hmeta')!.textContent =
+      `${s.players.length} at the table · free play`
 
-    const timer = hud.querySelector<HTMLElement>('#htimer')!
-    if (s.phaseEndsAt && (s.phase === 'playing' || s.phase === 'judging')) {
-      const left = Math.max(0, Math.ceil((s.phaseEndsAt - serverNow) / 1000))
-      timer.textContent = `${left}s`
-    } else {
-      timer.textContent = ''
-    }
-
-    const scores = hud.querySelector('#hscores')!
-    scores.innerHTML = ''
-    for (const p of [...s.players].sort((a, b) => b.score - a.score)) {
-      const row = el(
-        'div',
-        `score-row ${p.id === s.judgeId ? 'judge' : ''} ${p.connected ? '' : 'off'}`,
-      )
+    const roster = hud.querySelector('#hroster')!
+    roster.innerHTML = ''
+    for (const p of s.players) {
+      const row = el('div', `roster-row ${p.connected ? '' : 'off'}`)
       row.innerHTML = `
         <span class="swatch" style="background: hsl(${p.avatarHue} 55% 58%)"></span>
         <span class="nm"></span>
-        <span class="pts">${p.score}</span>
+        <span class="pts">${p.handCount}</span>
       `
-      const nm = row.querySelector('.nm')!
-      nm.textContent = p.name + (p.id === s.judgeId ? ' (judge)' : '')
-      scores.appendChild(row)
+      row.querySelector('.nm')!.textContent =
+        p.name + (p.id === s.you.id ? ' (you)' : '')
+      roster.appendChild(row)
     }
 
-    const msg = hud.querySelector<HTMLElement>('#hmsg')!
-    const nextBtn = hud.querySelector<HTMLElement>('#hnext')!
     const restartBtn = hud.querySelector<HTMLElement>('#hrestart')!
-    nextBtn.classList.add('hidden')
-    restartBtn.classList.add('hidden')
+    restartBtn.classList.toggle('hidden', !s.you.isHost)
 
-    const me = s.players.find((p) => p.id === s.you.id)
-    switch (s.phase) {
-      case 'dealing':
-        msg.innerHTML = 'Dealing…'
-        break
-      case 'playing':
-        msg.innerHTML = s.you.isJudge
-          ? 'You are the <strong>judge</strong> — sit tight.'
-          : me?.hasPlayed
-            ? 'Played. Waiting for the table…'
-            : `Drag a card onto the table${(s.prompt?.pick ?? 1) > 1 ? ' (×2)' : ''}.`
-        break
-      case 'revealing':
-        msg.innerHTML = 'Revealing plays…'
-        break
-      case 'judging':
-        msg.innerHTML = s.you.isJudge
-          ? 'Click the winning card.'
-          : 'The judge is deciding. Click a favourite to weigh in.'
-        break
-      case 'scoring': {
-        const w = s.players.find((p) => p.id === s.roundWinnerId)
-        msg.innerHTML = w ? `<strong>${escapeHtml(w.name)}</strong> takes the round.` : 'Round over.'
-        if (s.you.isHost) nextBtn.classList.remove('hidden')
-        break
-      }
-      case 'ended': {
-        const w = s.players.find((p) => p.id === s.winnerId)
-        msg.innerHTML = w ? `<strong>${escapeHtml(w.name)}</strong> wins the game!` : 'Game over.'
-        if (s.you.isHost) restartBtn.classList.remove('hidden')
-        break
-      }
-      default:
-        msg.textContent = ''
+    // Push remote notepad edits in, but do not clobber an in-progress edit.
+    if (!this.notepadDirty && s.notepad !== this.notepadLocal) {
+      this.notepadLocal = s.notepad
+      this.notepadInput.value = s.notepad
     }
   }
 }
@@ -592,10 +647,4 @@ function el<K extends keyof HTMLElementTagNameMap>(
   const node = document.createElement(tag)
   if (className) node.className = className
   return node
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!,
-  )
 }

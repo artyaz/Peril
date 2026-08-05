@@ -2,14 +2,9 @@
  * The world: renderer, seated camera, snapshot reconciliation, input, and the
  * frame loop.
  *
- * Two rules keep the multiplayer honest:
- *
- *  1. The server owns truth. Everything drawn here is either an authoritative
- *     snapshot or an explicitly-labelled local prediction that the next
- *     snapshot is allowed to overwrite.
- *  2. Your own hand is never interpolated; everyone else's is. That asymmetry
- *     is the whole trick — your input feels instant, and their motion is smooth
- *     rather than 20 Hz steppy.
+ * Free play: anyone can select, group, drag, place, and pick up cards at any
+ * time once the table is open. The server owns ownership + table poses; local
+ * input is applied immediately and confirmed by the next snapshot.
  */
 
 import * as THREE from 'three'
@@ -19,7 +14,7 @@ import {
   TABLE_SURFACE_Y,
   TABLE_Y,
 } from '../../shared/constants'
-import type { Presence, RoomSnapshot } from '../../shared/protocol'
+import type { CardPose, Presence, RoomSnapshot } from '../../shared/protocol'
 import type { NetClient } from '../net/client'
 import { damp, dampAngle, Spring } from '../spring'
 import { EYE_HEIGHT } from './avatar'
@@ -28,8 +23,9 @@ import { SeatManager } from './seats'
 import { buildEnvironment, type Environment } from './table'
 
 const DRAG_HEIGHT = TABLE_SURFACE_Y + 0.13
-const GRAVITY = -3.4
 const PLAY_RADIUS = TABLE_RADIUS * 0.92
+/** Drop inside this radius of your seat returns cards to your hand. */
+const PICKUP_SEAT_RADIUS = 0.38
 
 export class GameScene {
   readonly renderer: THREE.WebGLRenderer
@@ -60,28 +56,35 @@ export class GameScene {
   private downAt = { x: 0, y: 0 }
   private lastPointer = { x: 0, y: 0 }
   private orbiting = false
+  private shiftHeld = false
 
   private hoveredCard: Card | null = null
+  /** Primary card under the pointer when a drag begins. */
   private draggedCard: Card | null = null
-  private dragOffset = new THREE.Vector3()
+  /** All cards moving together (selection group). */
+  private dragGroup: Card[] = []
+  private dragOffsets = new Map<string, THREE.Vector3>()
   private dragVel = new THREE.Vector3()
   private lastDragPos = new THREE.Vector3()
+  private selected = new Set<string>()
 
-  // Locally predicted cards in flight (server has not confirmed yet).
-  private inFlight: Card[] = []
-  // Authoritative table cards, keyed by card id.
+  /** Hide the local fan from this client's viewport only. */
+  fanHidden = false
+
+  // Authoritative + locally predicted table cards, keyed by card id.
   private tableCards = new Map<string, Card>()
-  // Face-down markers for plays that are committed but not yet revealed.
-  private playedMarkers = new Map<number, Card>()
   // One reusable ghost per seat for remote drags.
   private ghosts = new Map<number, Card>()
 
-  private promptCard: Card | null = null
   private clock = new THREE.Clock()
   private running = false
+  /** Card ids we just placed/moved/picked — ignore conflicting snapshots briefly. */
+  private pendingIds = new Set<string>()
+  private pendingClearAt = 0
 
-  onPlay: ((cardIds: string[]) => void) | null = null
-  onVote: ((submissionPlayerId: string) => void) | null = null
+  onPlace: ((cards: CardPose[]) => void) | null = null
+  onPickup: ((cardIds: string[]) => void) | null = null
+  onMove: ((cards: CardPose[]) => void) | null = null
 
   constructor(container: HTMLElement, net: NetClient) {
     this.net = net
@@ -91,7 +94,6 @@ export class GameScene {
       powerPreference: 'high-performance',
       stencil: false,
     })
-    // Cap at 2× — beyond that the cost is quadratic and the gain invisible.
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.setSize(window.innerWidth, window.innerHeight)
     this.renderer.shadowMap.enabled = true
@@ -115,6 +117,8 @@ export class GameScene {
 
     this.bindInput()
     window.addEventListener('resize', this.onResize)
+    window.addEventListener('keydown', this.onKeyDown)
+    window.addEventListener('keyup', this.onKeyUp)
   }
 
   // -------------------------------------------------------------------------
@@ -122,11 +126,11 @@ export class GameScene {
   // -------------------------------------------------------------------------
 
   applySnapshot(state: RoomSnapshot) {
-    const prev = this.snapshot
     this.snapshot = state
     this.localSeat = state.you.seat
 
-    // --- Seats ---
+    if (performance.now() > this.pendingClearAt) this.pendingIds.clear()
+
     const occupied = new Set<number>()
     for (const p of state.players) {
       occupied.add(p.seat)
@@ -134,97 +138,56 @@ export class GameScene {
       rig.isLocal = p.seat === state.you.seat
       rig.avatar.setName(p.name)
       rig.avatar.setConnected(p.connected)
-      rig.avatar.setHighlight(p.id === state.judgeId)
+      rig.avatar.setHighlight(false)
 
       if (p.seat === state.you.seat) {
-        rig.syncHand({ count: p.handCount, hand: state.you.hand, renderer: this.renderer })
+        // Never rebuild cards that are mid-drag or awaiting server confirmation —
+        // that was the main source of fan/table flicker.
+        const busy = new Set<string>([
+          ...this.pendingIds,
+          ...this.dragGroup.map((c) => c.state.id),
+        ])
+        if (this.draggedCard) busy.add(this.draggedCard.state.id)
+        rig.syncHand({
+          count: p.handCount,
+          hand: state.you.hand,
+          renderer: this.renderer,
+          preserveIds: busy,
+        })
+        rig.fanAnchor.visible = !this.fanHidden
       } else {
         rig.syncHand({ count: p.handCount })
       }
     }
     this.seats.prune(occupied)
 
-    // --- Prompt ---
-    this.syncPrompt(state)
-
-    // --- Played markers (committed, not yet revealed) ---
-    this.syncPlayedMarkers(state)
-
-    // --- Authoritative table cards (judging onward) ---
     this.syncTableCards(state)
-
-    // A new round clears local prediction leftovers.
-    if (prev && prev.round !== state.round) {
-      for (const c of this.inFlight) c.removeFromParent()
-      this.inFlight = []
-    }
-  }
-
-  private syncPrompt(state: RoomSnapshot) {
-    if (!state.prompt) {
-      this.promptCard?.removeFromParent()
-      this.promptCard = null
-      return
-    }
-    if (this.promptCard && this.promptCard.state.text === state.prompt.text) return
-
-    this.promptCard?.removeFromParent()
-    const card = createCard({
-      id: 'prompt',
-      text: state.prompt.text,
-      ownerSeat: -1,
-      faceVisible: true,
-      variant: 'prompt',
-      renderer: this.renderer,
-    })
-    // Lies flat at the centre, angled so it is legible from every seat about
-    // equally — a shared object, not oriented to any one player.
-    card.position.set(0, TABLE_SURFACE_Y + 0.001, 0.13)
-    card.rotation.set(-Math.PI / 2, 0, 0)
-    card.scale.setScalar(1.35)
-    card.state.pos.set(card.position.x, card.position.y, card.position.z)
-    card.state.rot.set(card.rotation.x, 0, 0)
-    card.state.mode = 'table'
-    this.env.centre.add(card)
-    this.promptCard = card
-  }
-
-  private syncPlayedMarkers(state: RoomSnapshot) {
-    const shouldShow = state.phase === 'playing'
-    for (const p of state.players) {
-      const want = shouldShow && p.hasPlayed
-      const existing = this.playedMarkers.get(p.seat)
-      if (want && !existing) {
-        const card = createCard({
-          id: `played:${p.seat}`,
-          text: '',
-          ownerSeat: p.seat,
-          faceVisible: false,
-        })
-        // Rest it on the felt in front of its author, face-down.
-        const a = (p.seat / MAX_SEATS) * Math.PI * 2
-        const r = TABLE_RADIUS * 0.56
-        card.position.set(Math.sin(a) * r, TABLE_SURFACE_Y + 0.0015, Math.cos(a) * r)
-        card.rotation.set(-Math.PI / 2, -a, 0)
-        card.state.mode = 'table'
-        card.state.pos.set(card.position.x, card.position.y, card.position.z)
-        card.state.rot.set(card.rotation.x, card.rotation.y, 0)
-        card.state.lift.value = 0.05
-        card.state.lift.impulse(-0.9)
-        this.env.centre.add(card)
-        this.playedMarkers.set(p.seat, card)
-      } else if (!want && existing) {
-        existing.removeFromParent()
-        this.playedMarkers.delete(p.seat)
-      }
-    }
   }
 
   private syncTableCards(state: RoomSnapshot) {
     const seen = new Set<string>()
+    const dragging = new Set(this.dragGroup.map((c) => c.state.id))
+    if (this.draggedCard) dragging.add(this.draggedCard.state.id)
 
     for (const tc of state.tableCards) {
       seen.add(tc.id)
+
+      // Local prediction owns this card until the server catches up, or while
+      // the player is actively dragging it — do not snap under the pointer.
+      if (dragging.has(tc.id) || this.pendingIds.has(tc.id)) {
+        let card = this.tableCards.get(tc.id)
+        if (!card) {
+          // Snapshot arrived before our local mesh was keyed — adopt any
+          // in-hand card of the same id that we already pulled out.
+          continue
+        }
+        if (!dragging.has(tc.id)) {
+          card.state.pos.target(tc.x, TABLE_SURFACE_Y + 0.0018, tc.z)
+          card.state.rot.target(-Math.PI / 2, tc.rotY, 0)
+        }
+        continue
+      }
+
       let card = this.tableCards.get(tc.id)
       if (!card) {
         card = createCard({
@@ -236,7 +199,6 @@ export class GameScene {
         })
         card.state.mode = 'table'
         card.state.interactive = true
-        // Fly in from the owner's side rather than materialising.
         const a = (tc.ownerSeat / MAX_SEATS) * Math.PI * 2
         card.position.set(
           Math.sin(a) * TABLE_RADIUS * 0.8,
@@ -252,15 +214,19 @@ export class GameScene {
         revealFace(card, tc.text, 'response', this.renderer)
       }
 
+      card.state.selected = this.selected.has(tc.id)
+      card.state.mode = 'table'
+      card.state.interactive = true
       card.state.pos.target(tc.x, TABLE_SURFACE_Y + 0.0018, tc.z)
       card.state.rot.target(-Math.PI / 2, tc.rotY, 0)
     }
 
     for (const [id, card] of this.tableCards) {
-      if (!seen.has(id)) {
-        card.removeFromParent()
-        this.tableCards.delete(id)
-      }
+      if (seen.has(id)) continue
+      if (dragging.has(id) || this.pendingIds.has(id)) continue
+      card.removeFromParent()
+      this.tableCards.delete(id)
+      this.selected.delete(id)
     }
   }
 
@@ -278,20 +244,54 @@ export class GameScene {
     el.addEventListener('contextmenu', (e) => e.preventDefault())
   }
 
+  private onKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Shift') this.shiftHeld = true
+    if (e.repeat) return
+    if (this.isTypingTarget(e.target)) return
+
+    if (e.key === 'Escape') {
+      this.clearSelection()
+    } else if (e.key === 'a' && (e.metaKey || e.ctrlKey)) {
+      this.selectAllLocal()
+      e.preventDefault()
+    }
+  }
+
+  private onKeyUp = (e: KeyboardEvent) => {
+    if (e.key === 'Shift') this.shiftHeld = false
+  }
+
+  private isTypingTarget(t: EventTarget | null): boolean {
+    if (!(t instanceof HTMLElement)) return false
+    const tag = t.tagName
+    return tag === 'INPUT' || tag === 'TEXTAREA' || t.isContentEditable
+  }
+
+  toggleFanHidden() {
+    this.fanHidden = !this.fanHidden
+    const rig = this.seats.get(this.localSeat)
+    if (rig) rig.fanAnchor.visible = !this.fanHidden
+  }
+
   private updatePointer(e: PointerEvent) {
     const rect = this.renderer.domElement.getBoundingClientRect()
     this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
     this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
   }
 
-  /** Only the local fan and revealed table cards are ever interactive. */
+  /** Local fan + every table card are interactive during free play. */
   private pickCard(): Card | null {
     this.raycaster.setFromCamera(this.pointer, this.camera)
 
     const candidates: THREE.Object3D[] = []
+    const open = this.snapshot?.phase === 'open'
     const rig = this.seats.get(this.localSeat)
-    if (rig) for (const c of rig.cards) candidates.push(c)
-    if (this.snapshot?.phase === 'judging' && this.snapshot.you.isJudge) {
+    if (rig && !this.fanHidden) {
+      for (const c of rig.cards) {
+        if (c.state.mode === 'fan' || c.state.mode === 'drag') candidates.push(c)
+      }
+    }
+    if (open) {
       for (const c of this.tableCards.values()) candidates.push(c)
     }
     if (!candidates.length) return null
@@ -315,47 +315,110 @@ export class GameScene {
     this.lastPointer = { x: e.clientX, y: e.clientY }
     this.renderer.domElement.setPointerCapture?.(e.pointerId)
 
-    const card = this.pickCard()
-    const canPlay =
-      this.snapshot?.phase === 'playing' &&
-      !this.snapshot.you.isJudge &&
-      !this.snapshot.players.find((p) => p.seat === this.localSeat)?.hasPlayed
+    if (this.snapshot?.phase !== 'open') {
+      this.orbiting = true
+      return
+    }
 
-    if (card && card.state.ownerSeat === this.localSeat && canPlay) {
+    const card = this.pickCard()
+    if (card) {
       this.beginDrag(card)
       this.orbiting = false
     } else {
+      if (!this.shiftHeld) this.clearSelection()
       this.orbiting = true
     }
   }
 
   private beginDrag(card: Card) {
+    // Selection: shift toggles; otherwise select the clicked card (keep group
+    // if it was already part of the selection so multi-drag works).
+    if (this.shiftHeld) {
+      this.toggleSelect(card)
+    } else if (!this.selected.has(card.state.id)) {
+      this.clearSelection()
+      this.select(card)
+    }
+
+    const group = [...this.selected]
+      .map((id) => this.findCard(id))
+      .filter((c): c is Card => !!c)
+    if (!group.includes(card)) group.push(card)
+
     this.draggedCard = card
-    card.state.mode = 'drag'
-    card.state.hovered = false
-
-    const world = new THREE.Vector3()
-    card.getWorldPosition(world)
-
-    // Reparent to the scene so the drag lives in world space — which is also
-    // exactly the space we broadcast, so peers see the same motion.
-    this.scene.attach(card)
-    card.state.pos.set(card.position.x, card.position.y, card.position.z)
-    const e = new THREE.Euler().setFromQuaternion(card.quaternion, 'XYZ')
-    card.state.rot.set(e.x, e.y, e.z)
-    card.state.pos.tune(900, 46)
-    card.state.rot.tune(320, 26)
+    this.dragGroup = group
+    this.dragOffsets.clear()
 
     this.raycaster.setFromCamera(this.pointer, this.camera)
-    if (this.raycaster.ray.intersectPlane(this.dragPlane, this.hit)) {
-      this.dragOffset.copy(world).sub(this.hit)
-      this.dragOffset.y = 0
-    } else {
-      this.dragOffset.set(0, 0, 0)
+    const hitOk = this.raycaster.ray.intersectPlane(this.dragPlane, this.hit)
+
+    for (const c of group) {
+      c.state.mode = 'drag'
+      c.state.hovered = false
+      c.state.selected = true
+
+      const world = new THREE.Vector3()
+      c.getWorldPosition(world)
+      this.scene.attach(c)
+      c.state.pos.set(c.position.x, c.position.y, c.position.z)
+      const eul = new THREE.Euler().setFromQuaternion(c.quaternion, 'XYZ')
+      c.state.rot.set(eul.x, eul.y, eul.z)
+      c.state.pos.tune(900, 46)
+      c.state.rot.tune(320, 26)
+
+      const offset = new THREE.Vector3()
+      if (hitOk) {
+        offset.copy(world).sub(this.hit)
+        offset.y = 0
+      }
+      this.dragOffsets.set(c.state.id, offset)
+
+      // Leave the fan roster so layout cannot fight the drag.
+      const rig = this.seats.get(this.localSeat)
+      if (rig) rig.cards = rig.cards.filter((x) => x !== c)
     }
-    this.lastDragPos.copy(world)
+
+    this.lastDragPos.copy(card.position)
     this.dragVel.set(0, 0, 0)
     this.renderer.domElement.style.cursor = 'grabbing'
+  }
+
+  private findCard(id: string): Card | null {
+    const table = this.tableCards.get(id)
+    if (table) return table
+    const rig = this.seats.get(this.localSeat)
+    return rig?.cards.find((c) => c.state.id === id) ?? null
+  }
+
+  private select(card: Card) {
+    this.selected.add(card.state.id)
+    card.state.selected = true
+  }
+
+  private toggleSelect(card: Card) {
+    if (this.selected.has(card.state.id)) {
+      this.selected.delete(card.state.id)
+      card.state.selected = false
+    } else {
+      this.select(card)
+    }
+  }
+
+  private clearSelection() {
+    for (const id of this.selected) {
+      const c = this.findCard(id)
+      if (c) c.state.selected = false
+    }
+    this.selected.clear()
+  }
+
+  private selectAllLocal() {
+    this.clearSelection()
+    const rig = this.seats.get(this.localSeat)
+    if (rig && !this.fanHidden) {
+      for (const c of rig.cards) this.select(c)
+    }
+    for (const c of this.tableCards.values()) this.select(c)
   }
 
   private onPointerMove = (e: PointerEvent) => {
@@ -364,16 +427,16 @@ export class GameScene {
       this.pointerMoved = true
     }
 
-    if (this.draggedCard && this.pointerDown) {
+    if (this.dragGroup.length && this.pointerDown) {
       this.raycaster.setFromCamera(this.pointer, this.camera)
       if (this.raycaster.ray.intersectPlane(this.dragPlane, this.hit)) {
-        const target = this.hit.clone().add(this.dragOffset)
-        target.y = DRAG_HEIGHT
-        const st = this.draggedCard.state
-        st.pos.target(target.x, target.y, target.z)
-        // Cards lie flat as they approach the felt — reads as "placing", not
-        // "sliding a billboard around".
-        st.rot.target(-Math.PI / 2 + 0.16, st.rot.y.value, 0)
+        for (const c of this.dragGroup) {
+          const offset = this.dragOffsets.get(c.state.id) ?? new THREE.Vector3()
+          const target = this.hit.clone().add(offset)
+          target.y = DRAG_HEIGHT
+          c.state.pos.target(target.x, target.y, target.z)
+          c.state.rot.target(-Math.PI / 2 + 0.16, c.state.rot.y.value, 0)
+        }
       }
       return
     }
@@ -381,8 +444,6 @@ export class GameScene {
     if (this.pointerDown && this.orbiting && this.pointerMoved) {
       const dx = e.clientX - this.lastPointer.x
       const dy = e.clientY - this.lastPointer.y
-      // Look around from a fixed head position — this is a seat at a table,
-      // not a free-flying camera.
       this.yawOffset = THREE.MathUtils.clamp(this.yawOffset - dx * 0.0032, -0.85, 0.85)
       this.pitchOffset = THREE.MathUtils.clamp(this.pitchOffset - dy * 0.0026, -0.42, 0.5)
       this.lastPointer = { x: e.clientX, y: e.clientY }
@@ -391,29 +452,30 @@ export class GameScene {
 
     const card = this.pickCard()
     if (this.hoveredCard && this.hoveredCard !== card) this.hoveredCard.state.hovered = false
-    if (card && card.state.mode === 'fan') {
+    if (card && (card.state.mode === 'fan' || card.state.mode === 'table')) {
       card.state.hovered = true
       this.hoveredCard = card
       this.renderer.domElement.style.cursor = 'grab'
     } else {
       this.hoveredCard = null
-      this.renderer.domElement.style.cursor = card ? 'pointer' : 'default'
+      this.renderer.domElement.style.cursor = 'default'
     }
   }
 
   private onPointerUp = (e: PointerEvent) => {
     this.renderer.domElement.releasePointerCapture?.(e.pointerId)
 
-    if (this.draggedCard) {
-      this.releaseCard(this.draggedCard)
-      this.draggedCard = null
-    } else if (!this.pointerMoved) {
-      // A click (not a drag) during judging is a vote.
-      const card = this.pickCard()
-      if (card && this.snapshot?.phase === 'judging') {
-        const owner = this.snapshot.players.find((p) => p.seat === card.state.ownerSeat)
-        if (owner) this.onVote?.(owner.id)
+    if (this.dragGroup.length) {
+      if (this.pointerMoved) {
+        this.releaseGroup(this.dragGroup)
+      } else {
+        // Pure click — selection already applied in beginDrag; snap back if
+        // we yanked a fan card into world space without moving.
+        this.cancelDragNoMove(this.dragGroup)
       }
+      this.draggedCard = null
+      this.dragGroup = []
+      this.dragOffsets.clear()
     }
 
     this.pointerDown = false
@@ -421,43 +483,139 @@ export class GameScene {
     this.renderer.domElement.style.cursor = 'default'
   }
 
-  private releaseCard(card: Card) {
-    const st = card.state
-    const world = new THREE.Vector3()
-    card.getWorldPosition(world)
-    const dist = Math.hypot(world.x, world.z)
-
-    st.pos.tune(300, 27)
-    st.rot.tune(260, 25)
-
-    if (dist < PLAY_RADIUS) {
-      // Predict the play: throw it, tell the server, let the snapshot confirm.
-      st.mode = 'fly'
-      st.vel.copy(this.dragVel).clampLength(0, 2.6)
-      st.vel.y = Math.max(st.vel.y, 0.25)
-      st.spin.set(
-        (Math.random() - 0.5) * 1.2,
-        this.dragVel.x * 0.9,
-        (Math.random() - 0.5) * 1.4,
-      )
-      this.inFlight.push(card)
-
-      const rig = this.seats.get(this.localSeat)
-      if (rig) rig.cards = rig.cards.filter((c) => c !== card)
-      this.onPlay?.([st.id])
-    } else {
-      // Not over the table — return to the fan, keeping the throw's momentum
-      // so the snap-back feels elastic rather than teleported.
-      const rig = this.seats.get(this.localSeat)
-      if (rig) {
-        st.mode = 'fan'
+  private cancelDragNoMove(group: Card[]) {
+    const rig = this.seats.get(this.localSeat)
+    for (const card of group) {
+      const wasTable = this.tableCards.has(card.state.id)
+      if (wasTable) {
+        card.state.mode = 'table'
+        this.env.centre.attach(card)
+        card.state.pos.tune(300, 27)
+        card.state.rot.tune(260, 25)
+      } else if (rig) {
+        card.state.mode = 'fan'
         rig.fanAnchor.attach(card)
-        st.pos.set(card.position.x, card.position.y, card.position.z)
-        const e = new THREE.Euler().setFromQuaternion(card.quaternion, 'XYZ')
-        st.rot.set(e.x, e.y, e.z)
-        st.pos.impulse(this.dragVel.x * 0.4, this.dragVel.y * 0.4, this.dragVel.z * 0.4)
+        if (!rig.cards.includes(card)) rig.cards.push(card)
+        card.state.pos.set(card.position.x, card.position.y, card.position.z)
+        const eul = new THREE.Euler().setFromQuaternion(card.quaternion, 'XYZ')
+        card.state.rot.set(eul.x, eul.y, eul.z)
       }
     }
+  }
+
+  private releaseGroup(group: Card[]) {
+    if (!group.length) return
+
+    const primary = this.draggedCard ?? group[0]
+    const world = new THREE.Vector3()
+    primary.getWorldPosition(world)
+    const onTable = Math.hypot(world.x, world.z) < PLAY_RADIUS
+    const nearSeat = this.isNearLocalSeat(world)
+
+    const fromHand = group.filter((c) => !this.tableCards.has(c.state.id))
+    const fromTable = group.filter((c) => this.tableCards.has(c.state.id))
+
+    for (const card of group) {
+      const st = card.state
+      st.pos.tune(300, 27)
+      st.rot.tune(260, 25)
+    }
+
+    // Prefer pickup when the drop is near your seat (even if still over the
+    // table rim) — that is how you reclaim cards into the fan.
+    if (nearSeat && !onTable) {
+      this.returnGroupToHand(group)
+      return
+    }
+
+    if (nearSeat && fromTable.length && fromHand.length === 0) {
+      this.returnGroupToHand(group)
+      return
+    }
+
+    if (onTable) {
+      this.commitGroupToTable(group, fromHand, fromTable)
+      return
+    }
+
+    // Off-table, not near seat: hand cards snap back; table cards stay put.
+    if (fromHand.length) this.returnGroupToHand(fromHand)
+    if (fromTable.length) this.commitGroupToTable(fromTable, [], fromTable)
+  }
+
+  private isNearLocalSeat(world: THREE.Vector3): boolean {
+    const rig = this.seats.get(this.localSeat)
+    if (!rig) return false
+    const seat = new THREE.Vector3()
+    rig.group.getWorldPosition(seat)
+    return Math.hypot(world.x - seat.x, world.z - seat.z) < PICKUP_SEAT_RADIUS
+  }
+
+  private returnGroupToHand(group: Card[]) {
+    const rig = this.seats.get(this.localSeat)
+    if (!rig) return
+
+    const fromTableIds: string[] = []
+
+    for (const card of group) {
+      const wasTable = this.tableCards.has(card.state.id)
+      if (wasTable) {
+        fromTableIds.push(card.state.id)
+        this.tableCards.delete(card.state.id)
+      }
+
+      card.state.mode = 'fan'
+      card.state.ownerSeat = this.localSeat
+      rig.fanAnchor.attach(card)
+      if (!rig.cards.includes(card)) rig.cards.push(card)
+      card.state.pos.set(card.position.x, card.position.y, card.position.z)
+      const eul = new THREE.Euler().setFromQuaternion(card.quaternion, 'XYZ')
+      card.state.rot.set(eul.x, eul.y, eul.z)
+      card.state.pos.impulse(this.dragVel.x * 0.25, this.dragVel.y * 0.25, this.dragVel.z * 0.25)
+
+      this.pendingIds.add(card.state.id)
+    }
+
+    this.pendingClearAt = performance.now() + 600
+
+    if (fromTableIds.length) this.onPickup?.(fromTableIds)
+  }
+
+  private commitGroupToTable(group: Card[], fromHand: Card[], fromTable: Card[]) {
+    const poses: CardPose[] = []
+
+    for (const card of group) {
+      const st = card.state
+      const floor = TABLE_SURFACE_Y + 0.0018
+      // Light throw settle without a full ballistic sim (avoids fighting snaps).
+      st.mode = 'table'
+      st.interactive = true
+      this.env.centre.attach(card)
+      st.pos.target(card.position.x, floor, card.position.z)
+      st.rot.target(-Math.PI / 2, card.rotation.y, 0)
+      st.lift.value = 0.02
+      st.lift.impulse(-0.45)
+      this.tableCards.set(st.id, card)
+      this.pendingIds.add(st.id)
+
+      poses.push({
+        id: st.id,
+        x: st.pos.x.target,
+        z: st.pos.z.target,
+        rotY: st.rot.y.target,
+      })
+    }
+
+    this.pendingClearAt = performance.now() + 600
+
+    const handIds = new Set(fromHand.map((c) => c.state.id))
+    const place = poses.filter((p) => handIds.has(p.id))
+    const move = poses.filter((p) => !handIds.has(p.id))
+    if (place.length) this.onPlace?.(place)
+    if (move.length) this.onMove?.(move)
+
+    // fromTable unused beyond move — kept for clarity at call sites.
+    void fromTable
   }
 
   private onWheel = (e: WheelEvent) => {
@@ -485,11 +643,9 @@ export class GameScene {
       rig.group.updateWorldMatrix(true, false)
       rig.eyeWorld(eye)
     } else {
-      // Spectating / lobby: hover above the table looking down.
       eye.set(0, EYE_HEIGHT + 0.5, 1.5)
     }
 
-    // Face the table centre, then apply the player's look-around.
     const focus = new THREE.Vector3(0, TABLE_Y + 0.06, 0)
     const dir = focus.clone().sub(eye).normalize()
     const baseYaw = Math.atan2(-dir.x, -dir.z)
@@ -501,7 +657,6 @@ export class GameScene {
     this.camYaw = dampAngle(this.camYaw, targetYaw, 16, dt)
     this.camPitch = damp(this.camPitch, targetPitch, 16, dt)
 
-    // Lean moves the head along its own forward axis.
     const forward = new THREE.Vector3(
       -Math.sin(this.camYaw) * Math.cos(this.camPitch),
       Math.sin(this.camPitch),
@@ -518,7 +673,7 @@ export class GameScene {
   // -------------------------------------------------------------------------
 
   private publishPresence() {
-    const dragging = !!this.draggedCard
+    const dragging = this.dragGroup.length > 0
     const drag = this.draggedCard
     this.net.setPresence({
       seat: this.localSeat,
@@ -534,7 +689,6 @@ export class GameScene {
     })
   }
 
-  /** Render other players' live drags as world-space ghost cards. */
   private updateGhosts(presence: Map<number, Presence>, dt: number) {
     for (const [seat, p] of presence) {
       if (seat === this.localSeat) continue
@@ -554,7 +708,6 @@ export class GameScene {
           this.ghosts.set(seat, ghost)
         }
         ghost.visible = true
-        // Already interpolated upstream; a light damp absorbs quantisation steps.
         ghost.position.x = damp(ghost.position.x, p.dragX, 22, dt)
         ghost.position.y = damp(ghost.position.y, p.dragY, 22, dt)
         ghost.position.z = damp(ghost.position.z, p.dragZ, 22, dt)
@@ -566,52 +719,15 @@ export class GameScene {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Physics
-  // -------------------------------------------------------------------------
-
-  private stepFlying(dt: number) {
-    for (let i = this.inFlight.length - 1; i >= 0; i--) {
-      const card = this.inFlight[i]
-      const st = card.state
-
-      st.vel.y += GRAVITY * dt
-      card.position.addScaledVector(st.vel, dt)
-      card.rotation.x += st.spin.x * dt
-      card.rotation.y += st.spin.y * dt
-      card.rotation.z += st.spin.z * dt
-
-      const floor = TABLE_SURFACE_Y + 0.0016
-      if (card.position.y <= floor) {
-        card.position.y = floor
-        st.mode = 'table'
-        st.pos.set(card.position.x, floor, card.position.z)
-        // Settle flat with whatever heading it happened to land on.
-        st.rot.set(card.rotation.x, card.rotation.y, card.rotation.z)
-        st.rot.target(-Math.PI / 2, card.rotation.y, 0)
-        st.rot.tune(240, 22)
-        st.pos.target(card.position.x, floor, card.position.z)
-        st.lift.value = 0.02
-        st.lift.impulse(-0.5)
-        this.inFlight.splice(i, 1)
-        this.tableCards.set(`local:${st.id}`, card)
-      }
-    }
-  }
-
   private stepTableCards(dt: number) {
     for (const card of this.tableCards.values()) {
+      if (card.state.mode === 'drag') continue
       const st = card.state
       st.pos.step(dt)
       st.rot.step(dt)
       st.lift.stepTo(0, dt)
       card.position.set(st.pos.x.value, st.pos.y.value + st.lift.value, st.pos.z.value)
       card.rotation.set(st.rot.x.value, st.rot.y.value, st.rot.z.value)
-    }
-    for (const card of this.playedMarkers.values()) {
-      const st = card.state
-      st.lift.stepTo(0, dt)
-      card.position.y = st.pos.y.value + st.lift.value
     }
   }
 
@@ -649,22 +765,23 @@ export class GameScene {
       rig.update(dt, p, now)
     }
 
-    if (this.draggedCard) {
-      const st = this.draggedCard.state
-      st.pos.step(dt)
-      st.rot.step(dt)
-      const next = new THREE.Vector3(st.pos.x.value, st.pos.y.value, st.pos.z.value)
-      // Velocity for the throw, smoothed so one jittery frame cannot launch it.
-      if (dt > 0) {
-        this.dragVel.lerp(next.clone().sub(this.lastDragPos).divideScalar(dt), 0.35)
+    if (this.dragGroup.length) {
+      for (const card of this.dragGroup) {
+        const st = card.state
+        st.pos.step(dt)
+        st.rot.step(dt)
+        card.position.set(st.pos.x.value, st.pos.y.value, st.pos.z.value)
+        card.rotation.set(st.rot.x.value, st.rot.y.value, st.rot.z.value)
       }
-      this.lastDragPos.copy(next)
-      this.draggedCard.position.copy(next)
-      this.draggedCard.rotation.set(st.rot.x.value, st.rot.y.value, st.rot.z.value)
+      const primary = this.draggedCard
+      if (primary && dt > 0) {
+        const next = primary.position.clone()
+        this.dragVel.lerp(next.clone().sub(this.lastDragPos).divideScalar(dt), 0.35)
+        this.lastDragPos.copy(next)
+      }
     }
 
     this.updateGhosts(presence, dt)
-    this.stepFlying(dt)
     this.stepTableCards(dt)
     this.env.update(dt, now)
 
@@ -674,6 +791,8 @@ export class GameScene {
   dispose() {
     this.stop()
     window.removeEventListener('resize', this.onResize)
+    window.removeEventListener('keydown', this.onKeyDown)
+    window.removeEventListener('keyup', this.onKeyUp)
     this.seats.dispose()
     this.renderer.dispose()
     this.renderer.domElement.remove()

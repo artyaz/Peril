@@ -174,20 +174,34 @@ export class SeatRig {
     count: number
     hand?: CardData[]
     renderer?: THREE.WebGLRenderer
+    /** Card ids currently mid-drag / pending — leave them alone. */
+    preserveIds?: Set<string>
   }) {
     const target = opts.hand ? opts.hand.length : opts.count
     const local = !!opts.hand
+    const preserve = opts.preserveIds ?? new Set<string>()
 
     // Reuse existing meshes; only create/destroy the delta.
     if (local && opts.hand) {
       const byId = new Map(this.cards.map((c) => [c.state.id, c]))
       const next: Card[] = []
+      const handIds = new Set(opts.hand.map((c) => c.id))
+
       for (const data of opts.hand) {
         const existing = byId.get(data.id)
         if (existing) {
           byId.delete(data.id)
+          // Dragged cards live in world space — do not reparent them.
+          if (existing.state.mode === 'drag' || existing.state.mode === 'fly') {
+            next.push(existing)
+            continue
+          }
+          if (existing.parent !== this.fanAnchor) {
+            this.fanAnchor.attach(existing)
+          }
+          existing.state.mode = 'fan'
           next.push(existing)
-        } else {
+        } else if (!preserve.has(data.id)) {
           const card = createCard({
             id: data.id,
             text: data.text,
@@ -200,8 +214,26 @@ export class SeatRig {
           next.push(card)
         }
       }
-      for (const stale of byId.values()) stale.removeFromParent()
-      this.cards = next
+
+      // Keep preserved cards that left the authoritative hand briefly (pending
+      // place) so the mesh does not pop out of existence under the pointer.
+      for (const [id, card] of byId) {
+        if (preserve.has(id) || card.state.mode === 'drag') {
+          byId.delete(id)
+          if (!handIds.has(id) && card.state.mode === 'fan') {
+            // Authoritative hand dropped it and we are not dragging — discard.
+            card.removeFromParent()
+          } else {
+            next.push(card)
+          }
+        }
+      }
+
+      for (const stale of byId.values()) {
+        if (stale.state.mode === 'drag' || preserve.has(stale.state.id)) continue
+        stale.removeFromParent()
+      }
+      this.cards = next.filter((c) => c.parent || c.state.mode === 'drag')
     } else {
       while (this.cards.length > target) {
         this.cards.pop()?.removeFromParent()

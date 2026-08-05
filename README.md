@@ -1,8 +1,8 @@
 # Peril
 
-A party card game played around a shared 3D table. Everyone in a room sees the
-same world: the same felt, the same cards, and each other actually holding and
-throwing them.
+A free-play card table in shared 3D. Everyone in a room sees the same world: the
+same felt, the same cards, and each other holding and moving them — no turns,
+no judge, no scripted rounds.
 
 ```bash
 npm install
@@ -19,29 +19,29 @@ to configure — the game server is attached to Vite's own HTTP server in dev.
 
 ```
 shared/     wire protocol, binary codec, tuning constants   (imported by both ends)
-server/     authoritative game engine + WebSocket hub
+server/     authoritative free-play engine + WebSocket hub
 src/net/    client transport, clock sync, interpolation
 src/game/   three.js scene, seats, cards, avatars
-src/ui/     DOM overlay (home, lobby, HUD)
+src/ui/     DOM overlay (home, lobby, notepad, HUD)
 ```
 
 ### The server is authoritative
 
-Clients send *intent* (`play_cards`, `vote`); the server validates, mutates, and
-publishes. No client can play a card it does not hold, play out of turn, judge
-when it is not the judge, or start a game it does not host — each of those is a
-test in the suite.
+Clients send *intent* (`place_cards`, `pickup_cards`, `move_cards`, `set_notepad`);
+the server validates, mutates, and publishes. No client can place a card it does
+not hold, pick up a card that is not on the table, or open a table it does not
+host — each of those is a test in the suite.
 
 Snapshots are serialised **per viewer**. Your hand is in your snapshot and in
 nobody else's, so a peer cannot read your cards by opening devtools: the bytes
-never leave the server. Card backs are a visual nicety; the wire format is the
-actual guarantee.
+never leave the server. Once a card is placed on the table it is shared and
+face-up for everyone.
 
 ### Two channels, one socket
 
 | Channel | Format | Rate | Carries |
 |---|---|---|---|
-| Control | JSON | on change | joins, phases, plays, votes, snapshots |
+| Control | JSON | on change | joins, placements, notepad, snapshots |
 | Presence | binary | 20 Hz | head pose, hover, live card drags |
 
 Presence is the hot path, so it is packed rather than stringified:
@@ -56,6 +56,18 @@ At 8 players that is **2.5 KB/s** downstream. The same data as JSON is ~29 KB/s.
 Presence is deliberately lossy: a dropped packet is superseded 50 ms later, so
 it is never retried and never allowed to queue behind a congested socket. Every
 packet carries a sequence number and reordered ones are discarded.
+
+### Free play
+
+Once the host opens the table:
+
+- Drag cards from your fan onto the table (or back near your seat to pick up)
+- Click to select, Shift-click to multi-select, drag the group together
+- **H** hides your hand fan from your viewport (peers still see it)
+- **P** opens a shared notepad anyone can edit (scores, notes, house rules)
+
+There is no phase clock, judge, or voting. Disconnects keep their seat, hand,
+and score for 45 seconds; reconnecting restores all three.
 
 ### Why it feels synchronous
 
@@ -75,10 +87,6 @@ Three things, and the third is the one people skip:
 3. **Local input is never interpolated.** Your own hand and drags are applied
    immediately and predicted forward; the server confirms afterwards. That
    asymmetry is the whole trick — your input is instant, everyone else is smooth.
-
-Phases carry server-side deadlines, so a player who disconnects mid-round or
-wanders off can never stall the table. Disconnects keep their seat, hand, and
-score for 45 seconds; reconnecting restores all three.
 
 ---
 
