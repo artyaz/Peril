@@ -17,7 +17,7 @@ import {
   MAX_SEATS,
   MIN_PLAYERS,
   TARGET_SCORE,
-} from '../shared/constants'
+} from '../shared/constants.js'
 import type {
   CardData,
   PlayerPublic,
@@ -26,8 +26,8 @@ import type {
   RoomSnapshot,
   Submission,
   TableCard,
-} from '../shared/protocol'
-import { buildDeck, type Prompt } from './deck'
+} from '../shared/protocol.js'
+import { buildDeck, type Prompt } from './deck.js'
 
 // ---------------------------------------------------------------------------
 // Phase durations (ms)
