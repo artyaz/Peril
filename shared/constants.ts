@@ -6,7 +6,7 @@
  * it lives in `shared/` and is imported rather than duplicated.
  */
 
-export const PROTOCOL_VERSION = 3
+export const PROTOCOL_VERSION = 4
 
 // ---------------------------------------------------------------------------
 // Timing
@@ -45,13 +45,15 @@ export const DISCONNECT_GRACE_MS = 45_000
 export const ROOM_TTL_MS = 1000 * 60 * 60 * 3
 
 // ---------------------------------------------------------------------------
-// Game rules
+// Table
 // ---------------------------------------------------------------------------
 
 export const MAX_SEATS = 8
-export const MIN_PLAYERS = 3
+/** Free play — a single host can open the table alone. */
+export const MIN_PLAYERS = 1
 export const HAND_SIZE = 7
-export const TARGET_SCORE = 7
+/** Soft cap on the shared notepad so a runaway paste cannot blow the wire. */
+export const NOTEPAD_MAX = 8_000
 
 // ---------------------------------------------------------------------------
 // Quantization

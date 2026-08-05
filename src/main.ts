@@ -54,9 +54,9 @@ overlay.onHomeSubmit = async ({ name, code, create }) => {
 
   if (!scene) {
     scene = new GameScene(app, net)
-    scene.onPlay = (cardIds) => net.sendControl({ type: 'play_cards', cardIds })
-    scene.onVote = (submissionPlayerId) =>
-      net.sendControl({ type: 'vote', submissionPlayerId })
+    scene.onPlace = (cards) => net.sendControl({ type: 'place_cards', cards })
+    scene.onPickup = (cardIds) => net.sendControl({ type: 'pickup_cards', cardIds })
+    scene.onMove = (cards) => net.sendControl({ type: 'move_cards', cards })
     scene.start()
     // Keep the overlay above the canvas.
     app.appendChild(overlay.root)
@@ -85,7 +85,7 @@ net.onSnapshot = (state) => {
     rememberRoom(state.code, state.name)
   }
   scene?.applySnapshot(state)
-  overlay.render(state, net.serverNow())
+  overlay.render(state)
 }
 
 net.onEvent = (event: RoomEvent) => {
@@ -96,19 +96,11 @@ net.onEvent = (event: RoomEvent) => {
     case 'player_left':
       overlay.toast(`${event.name} left`)
       break
-    case 'round_start':
-      overlay.toast(`Round ${event.round}`)
+    case 'table_open':
+      overlay.toast('Table open — free play')
       break
-    case 'round_won': {
-      const name = net.snapshot?.players.find((p) => p.seat === event.seat)?.name ?? 'Someone'
-      overlay.toast(`${name} wins the round`, 'win')
+    case 'cards_dealt':
       break
-    }
-    case 'game_won': {
-      const name = net.snapshot?.players.find((p) => p.seat === event.seat)?.name ?? 'Someone'
-      overlay.toast(`${name} wins the game!`, 'win', 4200)
-      break
-    }
   }
 }
 
@@ -130,7 +122,6 @@ net.onStatus = () => {
 
 overlay.onStart = () => net.sendControl({ type: 'start' })
 overlay.onAddBot = () => net.sendControl({ type: 'add_bot' })
-overlay.onNextRound = () => net.sendControl({ type: 'next_round' })
 overlay.onRestart = () => net.sendControl({ type: 'restart' })
 overlay.onLeave = () => {
   net.sendControl({ type: 'leave' })
@@ -138,16 +129,17 @@ overlay.onLeave = () => {
   joined = false
   overlay.setView('home')
 }
+overlay.onToggleFan = () => {
+  scene?.toggleFanHidden()
+  if (scene) overlay.setFanHidden(scene.fanHidden)
+}
+overlay.onNotepadChange = (text) => net.sendControl({ type: 'set_notepad', text })
 
-// Refresh the countdown and the latency readout without re-rendering on every
-// animation frame — the HUD does not need 60 Hz.
 setInterval(() => {
   const s = net.snapshot
-  if (s && joined) overlay.render(s, net.serverNow())
+  if (s && joined) overlay.render(s)
   overlay.setNet(net.status, Math.round(net.rtt), net.diagnostics.starved)
 
-  // Report progress while the first connection is still being attempted, so a
-  // slow or unreachable server reads as "trying" rather than "broken button".
   if (!joined && net.status === 'reconnecting' && net.attempts >= 2) {
     overlay.showConnectingHint(
       `Still trying to reach the server… (attempt ${net.attempts})`,
